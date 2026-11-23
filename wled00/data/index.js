@@ -2521,9 +2521,10 @@ function setBri()
 // API keeps seg.sm.x in 0.1 LED units (0..50) and seg.sm.t in 10 ms units (0..100).
 var smPointerDown = false; // true while mouse/touch is held on a smoothing slider
 var smDirty = false;       // true after a local change until the device echoes it
-var smThrottle = null, smPending = null;
+var smThrottle = null;
+var smPendingBySeg = {}; // segId → latest unsent sm command (coalesce per segment)
 var smDragSeg = -1, smDragX = 0, smDragT = 0;
-var smSentX = 0, smSentT = 0; // last values actually sent to the device
+var smSentX = 0, smSentT = 0; // last values actually sent for smDragSeg
 var smSettleTimer = null;
 var SM_POS_MAX = 1000, SM_POS_MID = 500;
 function smPosToSpatial(pos)
@@ -2595,17 +2596,21 @@ function smPointerEnd()
 }
 function flushSmoothPending()
 {
-	let cmd = smPending;
-	smPending = null;
-	if (cmd) {
-		smSentX = cmd.seg.sm.x;
-		smSentT = cmd.seg.sm.t;
+	const pending = smPendingBySeg;
+	smPendingBySeg = {};
+	for (const id of Object.keys(pending)) {
+		const cmd = pending[id];
+		if (!cmd) continue;
+		if ((cmd.seg.id|0) === smDragSeg) {
+			smSentX = cmd.seg.sm.x;
+			smSentT = cmd.seg.sm.t;
+		}
 		requestJson(cmd);
 	}
 	// Trailing flush while the pointer is moving.
 	smThrottle = setTimeout(()=>{
 		smThrottle = null;
-		if (smPending) flushSmoothPending();
+		if (Object.keys(smPendingBySeg).length) flushSmoothPending();
 	}, 66);
 }
 function setSmoothLive(segId, ch, el)
@@ -2624,7 +2629,8 @@ function setSmoothLive(segId, ch, el)
 	} else {
 		if (other) smDragX = Math.round(Math.min(50, Math.max(0, smPosToSpatial(other.value) * 10)));
 	}
-	smPending = {"seg":{"id":segId,"sm":{"x":smDragX,"t":smDragT}}};
+	// Coalesce edits to the same segment; retain other segments' pending cmds.
+	smPendingBySeg[segId] = {"seg":{"id":segId,"sm":{"x":smDragX,"t":smDragT}}};
 	if (!smThrottle) flushSmoothPending();
 }
 
