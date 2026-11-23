@@ -2494,8 +2494,8 @@ function setBri()
 
 // Live output smoothing sliders (Segments tab). Throttled WS/JSON updates while dragging.
 // Slider position is 0..1000 with a piecewise log map (finer resolution at the low end):
-//   spatial:  first half → 0–1 LED,  second half → 1–5 LED (log)
-//   temporal: first half → 0–100 ms, second half → 100–1000 ms (log)
+//   Linear (spatial): first half → 0–1 LED,  second half → 1–5 LED (log)
+//   Time (temporal):  first half → 0–100 ms, second half → 100–1000 ms (log)
 // API keeps sm.x in 0.1 LED units (0..50) and sm.t in 10 ms units (0..100).
 var smLastX = 0, smLastT = 0, smDragging = false, smThrottle = null, smPending = null;
 var SM_POS_MAX = 1000, SM_POS_MID = 500;

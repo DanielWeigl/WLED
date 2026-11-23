@@ -4,9 +4,10 @@ Status: **implemented on branch** (step 1 global smoothing). Verify on hardware 
 Branch: `feature/output-smoothing` (local, created from `main` @ `d440ea89`).
 Read `AGENTS.md` first and follow it (see section 11).
 
-Implementation notes (2026-03-23):
-- Core: `wled00/output_smoothing.{h,cpp}` — binomial spatial (max 12 passes) + 2-stage IIR temporal.
-- Hook: `WS2812FX::show()` before overlays/gamma; skipped for realtime passthrough.
+Implementation notes (2026-03-23, updated 2026-11-23):
+- Core: `wled00/output_smoothing.{h,cpp}` — spatial: binomial `[1 2 1]/4` for `sm.x≤10`, forward+backward IIR above that (fixed 2 passes/axis); temporal: 2-stage IIR.
+- Hook: `WS2812FX::show()` before overlays/gamma; skipped for realtime passthrough; reaps history when both sliders are 0; re-seeds after bri off→on and after leaving realtime.
+- LED settings `SMX`/`SMT` update boot defaults only (do not overwrite live Segments-tab values).
 - API: state `sm.{x,t}`, cfg `hw.led.sm.{x,t}`, settings form `SMX`/`SMT`.
 - UI: live sliders on Segments tab; defaults on LED settings Advanced section.
 - `esp32dev` build SUCCESS after change: flash ~85.0% (+~3.6 KB vs baseline ~84.7%), RAM +32 B static.

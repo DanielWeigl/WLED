@@ -88,8 +88,8 @@ void OutputSmoother::seedHistory(const uint32_t *px, unsigned len) {
 }
 
 // In-place 1D blur along a strided sequence. weight 255 = full [1 2 1]/4; 0 = no-op.
-// Edge pixels replicate the border value.
-void OutputSmoother::blur1D(uint32_t *px, unsigned len, unsigned stride, uint8_t weight) const {
+// Edge pixels replicate the border value. Prefer stride==1 (sequential) for PSRAM.
+WLED_O2_ATTR void OutputSmoother::blur1D(uint32_t *px, unsigned len, unsigned stride, uint8_t weight) const {
   if (len < 2 || weight == 0) return;
   uint32_t prev = px[0];
   uint32_t curr = px[0];
@@ -103,23 +103,92 @@ void OutputSmoother::blur1D(uint32_t *px, unsigned len, unsigned stride, uint8_t
   }
 }
 
+// Vertical binomial pass using two scratch rows so reads stay sequential on the framebuffer.
+// maxWidth is capped at 255 elsewhere in WLED, so fixed stack buffers are safe.
+WLED_O2_ATTR void OutputSmoother::blur1DVertical(uint32_t *px, unsigned width, unsigned height, uint8_t weight) const {
+  if (width < 1 || height < 2 || weight == 0 || width > 255) return;
+  uint32_t rowPrev[256];
+  uint32_t rowCurr[256];
+  memcpy(rowPrev, px, width * sizeof(uint32_t));
+  memcpy(rowCurr, px, width * sizeof(uint32_t));
+  for (unsigned y = 0; y < height; y++) {
+    uint32_t *out = px + y * width;
+    const uint32_t *next = (y + 1 < height) ? (px + (y + 1) * width) : rowCurr;
+    for (unsigned x = 0; x < width; x++) {
+      uint32_t blurred = colorBlur121(rowPrev[x], rowCurr[x], next[x]);
+      out[x] = (weight == 255) ? blurred : color_blend(rowCurr[x], blurred, weight);
+    }
+    memcpy(rowPrev, rowCurr, width * sizeof(uint32_t));
+    if (y + 1 < height) memcpy(rowCurr, px + (y + 1) * width, width * sizeof(uint32_t));
+  }
+}
+
+// Forward then backward one-pole IIR along a strided line (approximate Gaussian for any sigma).
+WLED_O2_ATTR void OutputSmoother::iirSpatial1D(uint32_t *px, unsigned len, unsigned stride, uint16_t alphaQ15) const {
+  if (len < 2 || alphaQ15 == 0) return;
+
+  uint32_t c0 = px[0];
+  uint16_t r = chTo88(R(c0)), g = chTo88(G(c0)), b = chTo88(B(c0)), w = chTo88(W(c0));
+  for (unsigned i = 0; i < len; i++) {
+    uint32_t c = px[i * stride];
+    r = iirStep(r, chTo88(R(c)), alphaQ15);
+    g = iirStep(g, chTo88(G(c)), alphaQ15);
+    b = iirStep(b, chTo88(B(c)), alphaQ15);
+    w = iirStep(w, chTo88(W(c)), alphaQ15);
+    px[i * stride] = RGBW32((r + 128) >> 8, (g + 128) >> 8, (b + 128) >> 8, (w + 128) >> 8);
+  }
+
+  c0 = px[(len - 1) * stride];
+  r = chTo88(R(c0)); g = chTo88(G(c0)); b = chTo88(B(c0)); w = chTo88(W(c0));
+  for (unsigned i = len; i-- > 0; ) {
+    uint32_t c = px[i * stride];
+    r = iirStep(r, chTo88(R(c)), alphaQ15);
+    g = iirStep(g, chTo88(G(c)), alphaQ15);
+    b = iirStep(b, chTo88(B(c)), alphaQ15);
+    w = iirStep(w, chTo88(W(c)), alphaQ15);
+    px[i * stride] = RGBW32((r + 128) >> 8, (g + 128) >> 8, (b + 128) >> 8, (w + 128) >> 8);
+  }
+}
+
 void OutputSmoother::blurSpatial(uint32_t *px, unsigned width, unsigned height, unsigned len) const {
   uint8_t spatial = _spatial;
   if (spatial == 0 || !px || len == 0) return;
 
+  const bool is2D = (height > 1 && width > 1);
+  const unsigned matrixLen = is2D ? (width * height) : 0;
+
+  // Large sigma: fixed-cost forward+backward IIR (2 passes per axis) instead of O(sigma^2) binomials.
+  if (spatial > SMOOTH_SPATIAL_BINOMIAL_MAX) {
+    float sigma = (float)spatial / 10.0f;
+    if (sigma < 0.1f) sigma = 0.1f;
+    // alpha ≈ 1 - exp(-1/sigma): larger sigma → smaller alpha → wider blur.
+    float alphaF = 1.0f - expf(-1.0f / sigma);
+    if (alphaF < 0.0f) alphaF = 0.0f;
+    if (alphaF > 1.0f) alphaF = 1.0f;
+    uint16_t alphaQ15 = (uint16_t)(alphaF * 32768.0f + 0.5f);
+    if (alphaQ15 > 32768) alphaQ15 = 32768;
+    if (alphaQ15 == 0) return;
+
+    if (!is2D) {
+      iirSpatial1D(px, len, 1, alphaQ15);
+      return;
+    }
+    for (unsigned y = 0; y < height; y++) iirSpatial1D(px + y * width, width, 1, alphaQ15);
+    for (unsigned x = 0; x < width; x++) iirSpatial1D(px + x, height, width, alphaQ15);
+    if (len > matrixLen) iirSpatial1D(px + matrixLen, len - matrixLen, 1, alphaQ15);
+    return;
+  }
+
   // sigma = spatial/10; variance = sigma^2 = spatial^2/100
   // Full binomial pass variance = 1/2 → nFull = floor(2*sigma^2) = floor(spatial^2/50)
   unsigned nFull = ((unsigned)spatial * (unsigned)spatial) / 50;
-  if (nFull > SMOOTH_SPATIAL_MAX_PASSES) nFull = SMOOTH_SPATIAL_MAX_PASSES;
   // Remaining variance → fractional weight w with var(w) = w/2 (w in 0..1)
   // remVar = sigma^2 - nFull/2 = (spatial^2 - nFull*50)/100
   // w = 2*remVar → wQ8 = (spatial^2 - nFull*50) * 255 / 50
   unsigned remNum = (unsigned)spatial * (unsigned)spatial - nFull * 50;
-  uint8_t fracW = (uint8_t)((remNum * 255) / 50);
-  if (fracW > 255) fracW = 255;
-
-  const bool is2D = (height > 1 && width > 1);
-  const unsigned matrixLen = is2D ? (width * height) : 0;
+  unsigned remQ8 = (remNum * 255) / 50;
+  if (remQ8 > 255) remQ8 = 255; // clamp before narrowing (was truncated by uint8_t cast)
+  uint8_t fracW = (uint8_t)remQ8;
 
   auto pass = [&](uint8_t w) {
     if (w == 0) return;
@@ -127,10 +196,9 @@ void OutputSmoother::blurSpatial(uint32_t *px, unsigned width, unsigned height, 
       blur1D(px, len, 1, w);
       return;
     }
-    // Horizontal then vertical over the matrix region.
+    // Horizontal (sequential) then vertical (scratch-row sequential reads).
     for (unsigned y = 0; y < height; y++) blur1D(px + y * width, width, 1, w);
-    for (unsigned x = 0; x < width; x++) blur1D(px + x, height, width, w);
-    // Logical pixels past the matrix (rare hybrid setups) get a 1D pass.
+    blur1DVertical(px, width, height, w);
     if (len > matrixLen) blur1D(px + matrixLen, len - matrixLen, 1, w);
   };
 
@@ -138,7 +206,7 @@ void OutputSmoother::blurSpatial(uint32_t *px, unsigned width, unsigned height, 
   pass(fracW);
 }
 
-void OutputSmoother::blurTemporal(uint32_t *px, unsigned len, unsigned dtMs) {
+WLED_O2_ATTR void OutputSmoother::blurTemporal(uint32_t *px, unsigned len, unsigned dtMs, bool processW) {
   if (!_hist || len == 0 || len > _histLen) return;
 
   // No time passed: emit current stage-2 state without updating.
@@ -169,7 +237,6 @@ void OutputSmoother::blurTemporal(uint32_t *px, unsigned len, unsigned dtMs) {
     uint16_t rT = chTo88(R(c));
     uint16_t gT = chTo88(G(c));
     uint16_t bT = chTo88(B(c));
-    uint16_t wT = chTo88(W(c));
 
     // Stage 1
     uint32_t rg1 = _hist[i * 4 + 0];
@@ -177,7 +244,13 @@ void OutputSmoother::blurTemporal(uint32_t *px, unsigned len, unsigned dtMs) {
     uint16_t r1 = iirStep((uint16_t)(rg1 & 0xFFFF), rT, alphaQ15);
     uint16_t g1 = iirStep((uint16_t)(rg1 >> 16),    gT, alphaQ15);
     uint16_t b1 = iirStep((uint16_t)(bw1 & 0xFFFF), bT, alphaQ15);
-    uint16_t w1 = iirStep((uint16_t)(bw1 >> 16),    wT, alphaQ15);
+    uint16_t w1;
+    if (processW) {
+      uint16_t wT = chTo88(W(c));
+      w1 = iirStep((uint16_t)(bw1 >> 16), wT, alphaQ15);
+    } else {
+      w1 = (uint16_t)(bw1 >> 16); // leave W state unchanged on RGB-only strips
+    }
     _hist[i * 4 + 0] = (uint32_t)r1 | ((uint32_t)g1 << 16);
     _hist[i * 4 + 1] = (uint32_t)b1 | ((uint32_t)w1 << 16);
 
@@ -187,22 +260,24 @@ void OutputSmoother::blurTemporal(uint32_t *px, unsigned len, unsigned dtMs) {
     uint16_t r2 = iirStep((uint16_t)(rg2 & 0xFFFF), r1, alphaQ15);
     uint16_t g2 = iirStep((uint16_t)(rg2 >> 16),    g1, alphaQ15);
     uint16_t b2 = iirStep((uint16_t)(bw2 & 0xFFFF), b1, alphaQ15);
-    uint16_t w2 = iirStep((uint16_t)(bw2 >> 16),    w1, alphaQ15);
+    uint16_t w2 = processW ? iirStep((uint16_t)(bw2 >> 16), w1, alphaQ15) : (uint16_t)(bw2 >> 16);
     _hist[i * 4 + 2] = (uint32_t)r2 | ((uint32_t)g2 << 16);
     _hist[i * 4 + 3] = (uint32_t)b2 | ((uint32_t)w2 << 16);
 
-    px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8, (w2 + 128) >> 8);
+    px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8,
+                   processW ? ((w2 + 128) >> 8) : W(c));
   }
 }
 
-void OutputSmoother::apply(uint32_t *px, unsigned width, unsigned height, unsigned len, unsigned dtMs) {
-  if (!px || len == 0) return;
+void OutputSmoother::apply(uint32_t *px, unsigned width, unsigned height, unsigned len, unsigned dtMs, bool processW) {
   uint8_t spatial = _spatial;
   uint8_t temporal = _temporal;
+  // Reap path: both off → free history even when px is null (show() calls this after slider → 0).
   if (spatial == 0 && temporal == 0) {
     freeHistory();
     return;
   }
+  if (!px || len == 0) return;
 
   // Spatial first (operates on current frame), then temporal (needs history).
   if (spatial > 0) {
@@ -215,7 +290,7 @@ void OutputSmoother::apply(uint32_t *px, unsigned width, unsigned height, unsign
     ensureHistory(len);
     if (_hist) {
       if (_needsReset || _histLen != len) seedHistory(px, len);
-      else blurTemporal(px, len, dtMs);
+      else blurTemporal(px, len, dtMs, processW);
     }
   } else if (temporal == 0) {
     freeHistory();
