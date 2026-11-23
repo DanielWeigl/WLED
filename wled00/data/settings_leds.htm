@@ -322,6 +322,9 @@
 			if (isAna(t)) return 5;	// analog
 			let len = parseInt(d.Sf["LC"+n].value) + parseInt(d.Sf["SL"+n].value);
 			let pbfr = len * 8; // pixel buffers: global buffer + segment buffer
+			// Temporal smoothing history: 2 stages × 8 bytes/LED while default SMT > 0
+			let smt = d.Sf.SMT ? parseInt(d.Sf.SMT.value)||0 : 0;
+			if (smt > 0) pbfr += len * 16;
 			let ch = getChannels(t, n);
 
 			let mem = 0;
@@ -1401,6 +1404,11 @@ Swap: <select id="xw${s}" name="XW${s}">
 		<div id="fpsNone" class="warn" style="display: none;">&#9888; Unlimited FPS Mode is experimental &#9888;<br></div>
 		<div id="fpsHigh" class="warn" style="display: none;">&#9888; High FPS Mode is experimental.<br></div>
 		<div id="fpsWarn" class="warn" style="display: none;">Please <a class="lnk" href="sec#backup">backup</a> WLED configuration and presets first!<br></div>
+		<br>
+		Smoothing defaults (applied at boot; live tuning is on the Segments tab):<br>
+		Spatial: <input type="number" class="s" min="0" max="50" name="SMX" oninput="UI()" required> (0.1 LED, 0–50 = 0–5 LEDs)<br>
+		Temporal: <input type="number" class="s" min="0" max="100" name="SMT" oninput="UI()" required> (10 ms, 0–100 = 0–1000 ms)<br>
+		<small>Temporal smoothing uses ~16 bytes of RAM per LED while enabled. Main UI sliders use a log scale.</small><br>
 		<br><br>
 	</div>
 	<div id="cfg">Config template: <input type="file" name="data2" accept=".json"><button type="button" class="sml" onclick="loadCfg(d.Sf.data2)">Apply</button><br></div>

@@ -363,6 +363,10 @@ void getSettingsJS(byte subPage, Print& settingsScript)
     printSetFormCheckbox(settingsScript,PSTR("CR"),strip.cctFromRgb);
     printSetFormValue(settingsScript,PSTR("CB"),Bus::getCCTBlend());
     printSetFormValue(settingsScript,PSTR("FR"),strip.getTargetFps());
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    printSetFormValue(settingsScript,PSTR("SMX"),smoothDefaultX);
+    printSetFormValue(settingsScript,PSTR("SMT"),smoothDefaultT);
+#endif
     printSetFormValue(settingsScript,PSTR("AW"),Bus::getGlobalAWMode());
 
     unsigned sumMa = 0;

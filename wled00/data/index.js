@@ -1486,6 +1486,23 @@ function readState(s,command=false)
 	if (tr===0) gId('bsp').classList.add('hide')
 	else gId('bsp').classList.remove('hide')
 
+	// Output smoothing (global). Update sliders from state without sending back.
+	if (s.sm) {
+		let sx = parseInt(s.sm.x)||0, st = parseInt(s.sm.t)||0;
+		let elX = gId('sliderSmX'), elT = gId('sliderSmT');
+		if (elX && !smDragging) {
+			elX.value = smSpatialToPos(sx / 10); // API 0.1 LED → LEDs → slider pos
+			updateTrail(elX);
+			formatSmoothLabel('x', elX.value);
+		}
+		if (elT && !smDragging) {
+			elT.value = smMsToPos(st * 10); // API 10 ms → ms → slider pos
+			updateTrail(elT);
+			formatSmoothLabel('t', elT.value);
+		}
+		smLastX = sx; smLastT = st;
+	}
+
 	populateSegments(s);
 	hasRGB = hasWhite = hasCCT = has2D = false;
 	segLmax = 0; // reset max selected segment length
@@ -2473,6 +2490,70 @@ function setBri()
 {
 	var obj = {"bri": parseInt(gId('sliderBri').value)};
 	requestJson(obj);
+}
+
+// Live output smoothing sliders (Segments tab). Throttled WS/JSON updates while dragging.
+// Slider position is 0..1000 with a piecewise log map (finer resolution at the low end):
+//   spatial:  first half → 0–1 LED,  second half → 1–5 LED (log)
+//   temporal: first half → 0–100 ms, second half → 100–1000 ms (log)
+// API keeps sm.x in 0.1 LED units (0..50) and sm.t in 10 ms units (0..100).
+var smLastX = 0, smLastT = 0, smDragging = false, smThrottle = null, smPending = null;
+var SM_POS_MAX = 1000, SM_POS_MID = 500;
+function smPosToSpatial(pos)
+{
+	pos = Math.max(0, Math.min(SM_POS_MAX, +pos || 0));
+	if (pos <= SM_POS_MID) return (pos / SM_POS_MID) * 1;
+	return Math.pow(5, (pos - SM_POS_MID) / SM_POS_MID); // 1..5
+}
+function smSpatialToPos(led)
+{
+	led = Math.max(0, Math.min(5, +led || 0));
+	if (led <= 1) return Math.round(led * SM_POS_MID);
+	return Math.round(SM_POS_MID + (Math.log(led) / Math.log(5)) * SM_POS_MID);
+}
+function smPosToMs(pos)
+{
+	pos = Math.max(0, Math.min(SM_POS_MAX, +pos || 0));
+	if (pos <= SM_POS_MID) return (pos / SM_POS_MID) * 100;
+	return 100 * Math.pow(10, (pos - SM_POS_MID) / SM_POS_MID); // 100..1000
+}
+function smMsToPos(ms)
+{
+	ms = Math.max(0, Math.min(1000, +ms || 0));
+	if (ms <= 100) return Math.round((ms / 100) * SM_POS_MID);
+	return Math.round(SM_POS_MID + Math.log10(ms / 100) * SM_POS_MID);
+}
+function formatSmoothLabel(ch, pos)
+{
+	if (ch==='x') {
+		let o = gId('smxOut');
+		if (o) o.innerHTML = smPosToSpatial(pos).toFixed(2);
+	} else {
+		let o = gId('smtOut');
+		if (o) o.innerHTML = Math.round(smPosToMs(pos)) + ' ms';
+	}
+}
+function flushSmoothPending()
+{
+	let cmd = smPending;
+	smPending = null;
+	if (cmd) requestJson(cmd);
+	// Trailing flush: if the user kept dragging, send once more after this window.
+	smThrottle = setTimeout(()=>{
+		smThrottle = null;
+		if (smPending) flushSmoothPending();
+		else smDragging = false;
+	}, 66);
+}
+function setSmoothLive(ch, el)
+{
+	smDragging = true;
+	let pos = parseInt(el.value)||0;
+	formatSmoothLabel(ch, pos);
+	if (ch==='x') smLastX = Math.round(Math.min(50, Math.max(0, smPosToSpatial(pos) * 10)));
+	else smLastT = Math.round(Math.min(100, Math.max(0, smPosToMs(pos) / 10)));
+	smPending = {"sm":{"x":smLastX,"t":smLastT}};
+	if (!smThrottle) flushSmoothPending(); // send immediately, then throttle further updates
 }
 
 function setSpeed()

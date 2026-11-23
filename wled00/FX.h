@@ -19,6 +19,7 @@
 #include <vector>
 #include "wled.h"
 #include "colors.h"
+#include "output_smoothing.h"
 #ifdef WLED_DEBUG
   // enable additional debug output
   #if defined(WLED_DEBUG_HOST)
@@ -935,6 +936,14 @@ class WS2812FX {
     #endif
     }
 
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    // Global spatial/temporal output smoothing (see docs/design/output-smoothing.md)
+    inline void setSmoothing(uint8_t spatial, uint8_t temporal) { _smoother.setTargets(spatial, temporal); }
+    inline uint8_t getSmoothSpatial()  const { return _smoother.getSpatial(); }
+    inline uint8_t getSmoothTemporal() const { return _smoother.getTemporal(); }
+    inline void resetSmoothing()             { _smoother.reset(); }
+#endif
+
     void setRealtimePixelColor(unsigned i, uint32_t c);
     inline void setPixelColor(unsigned n, uint32_t c) const   {
       #ifdef WLED_DISABLE_GLOBAL_PIXELBUFFER
@@ -1077,6 +1086,9 @@ class WS2812FX {
     uint32_t *_pixels;
     uint8_t  *_pixelCCT;
     std::vector<Segment> _segments;
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    OutputSmoother _smoother;
+#endif
 
     volatile bool _suspend;
 

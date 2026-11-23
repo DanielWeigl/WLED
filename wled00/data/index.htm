@@ -307,6 +307,24 @@
 			<option value="14" data-type="2D">Circular Out</option>
 			<option value="15" data-type="2D">Circular In</option>
 		</select></div>
+		<p>Spatial smoothing</p>
+		<div id="smp" class="slider">
+			<i class="icons slider-icon">&#xe410;</i>
+			<div class="sliderwrap il">
+				<input id="sliderSmX" class="noslide" oninput="updateTrail(this); setSmoothLive('x', this)" max="1000" min="0" type="range" value="0" />
+				<div class="sliderdisplay"></div>
+			</div>
+			<output class="sliderbubble" id="smxOut" style="width:auto;min-width:24px;white-space:nowrap;padding:4px 8px">0.0</output>
+		</div>
+		<p>Temporal smoothing</p>
+		<div id="smtp" class="slider">
+			<i class="icons slider-icon">&#xe22d;</i>
+			<div class="sliderwrap il">
+				<input id="sliderSmT" class="noslide" oninput="updateTrail(this); setSmoothLive('t', this)" max="1000" min="0" type="range" value="0" />
+				<div class="sliderdisplay"></div>
+			</div>
+			<output class="sliderbubble" id="smtOut" style="width:auto;min-width:24px;white-space:nowrap;padding:4px 8px">0 ms</output>
+		</div>
 		<p id="ledmap" class="hide"></p>
 	</div>
 
