@@ -1,16 +1,15 @@
 # Output smoothing: spatial + temporal filter for all effects
 
-Status: **implemented on branch** (step 1 global smoothing). Verify on hardware still pending.
-Branch: `feature/output-smoothing` (local, created from `main` @ `d440ea89`).
+Status: **implemented on branch** (per-segment smoothing). Built/OTA-tested on `esp32dev` hardware.
+Branch: `feature/output-smoothing` (vs `main`).
 Read `AGENTS.md` first and follow it (see section 11).
 
-Implementation notes (2026-03-23, updated 2026-11-23):
-- Core: `wled00/output_smoothing.{h,cpp}` — spatial: binomial `[1 2 1]/4` for `sm.x≤10`, forward+backward IIR above that (fixed 2 passes/axis); temporal: 2-stage IIR.
-- Hook: `WS2812FX::show()` before overlays/gamma; skipped for realtime passthrough; reaps history when both sliders are 0; re-seeds after bri off→on and after leaving realtime.
-- LED settings `SMX`/`SMT` update boot defaults only (do not overwrite live Segments-tab values).
-- API: state `sm.{x,t}`, cfg `hw.led.sm.{x,t}`, settings form `SMX`/`SMT`.
-- UI: live sliders on Segments tab; defaults on LED settings Advanced section.
-- `esp32dev` build SUCCESS after change: flash ~85.0% (+~3.6 KB vs baseline ~84.7%), RAM +32 B static.
+Implementation notes (2026-11-23, per-segment):
+- Core: `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace` (reusable mapped layer + coverage) and `SegmentSmoothHist` (per-segment temporal IIR). Spatial: binomial for `sm.x≤10`, forward+backward IIR above; coverage-aware run boundaries (no bleed across spacing/segment edges).
+- Hook: in `WS2812FX::show()`, each active segment is either blended directly or **map → filter physical layer → composite with Blend Mode**. Overlays/gamma stay after composition. Realtime passthrough skips smoothing and reseeds on exit.
+- Defaults: LED settings `SMX`/`SMT` / cfg `hw.led.sm.{x,t}` seed `Segment` construction defaults. Live values live on each segment.
+- API: `{"seg":{"id":N,"sm":{"x":...,"t":...}}}` in state/presets. Legacy root-level `sm` is accepted as migration input (applied to segments without their own `sm`) and is no longer emitted.
+- UI: Linear/Time sliders inside each expanded segment panel, after Blend Mode and before Reverse.
 
 ## 1. Goal (plain language, from the requester)
 
@@ -32,9 +31,8 @@ slider), not only after a save.
 
 | Topic | Decision |
 |---|---|
-| Scope step 1 | One **global** setting for the whole strip. |
-| Scope step 2 | Optional later: per segment (see section 10). Do not build it now, but do not block it. |
-| Filter position | Before gamma correction (`gamma32()` stays after the filter). |
+| Scope | **Per-segment** settings (`smoothSpatial` / `smoothTemporal`). |
+| Filter position | Mapped physical segment layer, **before** Blend Mode composition and before gamma. |
 | Targets | ESP32 and all variants (classic, S2, S3, C3, C5, C6, P4). ESP8266 builds compile the feature out. |
 | Realtime sources (DDP, E1.31, Art-Net, ...) | Nice to have, not important. Step 1 bypasses the filter in realtime mode (reason in 5.4). |
 | Live preview | Required. Controls live in the main UI and use the JSON API (section 6). |
@@ -72,12 +70,12 @@ slider), not only after a save.
 
 ### 4.1 Insert point
 
-In `WS2812FX::show()` after the compose block and **before** `handleOverlayDraw()`
-(so overlays stay sharp), operating on `_pixels[]` in place for the effects path.
-The gamma loop afterwards is unchanged.
+Per active segment in `WS2812FX::show()`: map into a reusable physical layer, filter that
+layer, then composite into `_pixels[]` with Blend Mode. Overlays run after all segments
+are composed; gamma stays after overlays.
 
 ```text
-effects -> Segment::pixels -> blendSegment -> _pixels[] -> [ SMOOTHING ] -> overlay -> gamma -> bus
+effects -> Segment::pixels -> map to physical layer -> [ SEGMENT SMOOTHING ] -> Blend Mode into _pixels[] -> overlay -> gamma -> bus
 ```
 
 ### 4.2 Parameters (stable contract, units are physical on purpose)
@@ -85,7 +83,7 @@ effects -> Segment::pixels -> blendSegment -> _pixels[] -> [ SMOOTHING ] -> over
 | Name | JSON key | Range | Unit | Meaning |
 |---|---|---|---|---|
 | spatial width | `sm.x` | 0..50 (0 = off) | 0.1 LED | Standard deviation sigma of the Gaussian-like kernel, along the logical pixel order (1D) or x and y (2D). |
-| temporal width | `sm.t` | 0..250 (0 = off) | 10 ms | Mean latency (time constant tau) of the cascaded filter for a step input. |
+| temporal width | `sm.t` | 0..100 (0 = off) | 10 ms | Mean latency (time constant tau) of the cascaded filter for a step input (0..1000 ms). |
 
 Values above the range are clamped. Both 0 means the feature is fully off.
 
@@ -106,8 +104,8 @@ Values above the range are clamped. Both 0 means the feature is fully off.
   `colors.h`) or per-channel integer math. No floating point per pixel.
 - In-place filtering needs the original neighbours: keep a rolling window in registers
   (1D) or one scratch row (2D). Do not allocate a full second frame buffer.
-- Segment borders and bus borders are not respected in step 1 (neighbouring segments bleed
-  into each other). Document this limitation in the UI tooltip or readme.
+- Spatial filtering is coverage-aware within a segment (spacing holes are boundaries).
+  Neighbouring segments do not bleed into each other because filtering runs before Blend Mode.
 
 ### 4.4 Temporal filter
 
@@ -173,8 +171,8 @@ choice. Note it in the code comments.
    partially (for example some E1.31 universes). An in-place filter would feed its own output
    back in the next frame (compounding blur). Step 1: skip smoothing whenever `_pixels[]` is
    not rebuilt from segments, i.e. when the condition of the compose block in `show()` is
-   false. A later option (step 1b) is a non-destructive variant that writes into a scratch
-   buffer.
+   false. A later option could add a non-destructive realtime variant that writes into a
+   scratch buffer.
 6. **Compile-time switch.** `WLED_DISABLE_OUTPUT_SMOOTHING`, automatically defined when
    `WLED_DISABLE_GLOBAL_PIXELBUFFER` is defined (ESP8266). Do not edit `platformio.ini`
    (maintainer approval needed). All new code is wrapped in `#ifndef WLED_DISABLE_OUTPUT_SMOOTHING`.
@@ -186,18 +184,20 @@ choice. Note it in the code comments.
 
 ## 6. API contract (frozen so UI and firmware can be built in parallel)
 
-State JSON (`/json/state`, WebSocket, presets), global, next to `transition` and `bs`:
+State JSON (`/json/state`, WebSocket, presets), **per segment**:
 
 ```json
-{"sm": {"x": 12, "t": 40}}
+{"seg": {"id": 0, "sm": {"x": 12, "t": 40}}}
 ```
 
 - Request: both keys optional. Missing key means "keep the current value". Missing `sm`
   object means "unchanged" (old presets must not reset the setting).
-- Response (`serializeState`): written inside the `if (includeBri)` block next to
-  `transition` and `bs` (`json.cpp`, near line 650), so presets store it.
-- Do **not** set `stateChanged` for `sm` (same as `bs`): this keeps the active preset marker
-  and avoids sync broadcasts while dragging a slider.
+- Response: each `serializeSegment()` emits `sm.{x,t}` so presets store per-segment values.
+- Legacy root-level `{"sm":{"x":..,"t":..}}` is still accepted as a migration input and applied
+  to segments that did not send their own `sm`; it is no longer serialized.
+- Segment `sm` changes do **not** set `stateChanged` (same live-drag rationale as `bs`), so
+  WebSocket clients are not flooded while a slider moves. Values are still returned whenever
+  state is requested (`v:true`) and are stored in presets via `serializeSegment()`.
 
 Persistent defaults (`cfg.json`, section `hw.led`):
 
@@ -208,111 +208,29 @@ Persistent defaults (`cfg.json`, section `hw.led`):
 Loaded in `deserializeConfig()` (`cfg.cpp`, near the `fps` handling at line 190), written in
 `serializeConfig()` (near line 1010). Applied once at boot.
 
-## 7. Work packages
+## 7. Implementation map (as landed)
 
-Dependencies: WP1 and WP5 can run in parallel (UI is built against the contract in section 6).
-WP2 needs WP1. WP3 needs WP2. WP4 and WP6 need WP3. WP7 needs all.
+| Area | Location |
+|---|---|
+| Filter core | `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace`, `SegmentSmoothHist`, coverage-aware spatial blur |
+| Segment fields / hist lifecycle | `Segment::smoothSpatial` / `smoothTemporal` + `_smoothHist` in `FX.h` / `FX_fcn.cpp` |
+| Render path | `blendSegment()` layer capture via `putPixel`; per-segment map→filter→`compositeSmoothLayer()` in `show()` |
+| State / presets | `serializeSegment` / `deserializeSegment` `sm.{x,t}`; optional root `sm` migration in `deserializeState` |
+| Boot defaults | `smoothDefaultX/T` in `wled.h`, cfg `hw.led.sm`, settings `SMX`/`SMT`, `Segment::setSmoothDefaults()` |
+| UI | Per-segment Linear/Time rows in `populateSegments()` (`index.js` / `index.css`); pointer-locked drag updates |
 
-### WP1 - Filter core (pure functions, no WLED globals)
-
-- New files `wled00/output_smoothing.h/.cpp` (everything under `#ifndef WLED_DISABLE_OUTPUT_SMOOTHING`).
-- Suggested interface (adjust if needed):
-
-```cpp
-class OutputSmoother {
-  public:
-    void setTargets(uint8_t spatial, uint8_t temporal);    // cheap, any task
-    bool isActive() const;                                 // either value > 0
-    // called from WS2812FX::show() only (main loop context)
-    void apply(uint32_t *px, unsigned width, unsigned height, unsigned len, unsigned dtMs);
-    void reset();                                          // history re-sync on next apply()
-    size_t memoryUsed() const;
-};
-```
-
-- Implements 4.3 to 4.5 and all of section 5 that concerns the filter (lazy allocation,
-  reset, graceful failure). No Arduino/WLED dependencies in the math functions so they can
-  be tested on the host.
-- Mark AI-generated code with `// AI: below section was generated by an AI` / `// AI: end`.
-- Acceptance: both values 0 means no allocation and no per-pixel work; a constant input
-  frame stays exactly constant at any setting (no drift, no rounding errors); a step input
-  converges to the exact target value; no signed overflow (check with min/max test values).
-
-### WP2 - Integration in `show()`
-
-- `FX.h`: add `OutputSmoother _smoother;` to `WS2812FX`, public `setSmoothing(uint8_t x, uint8_t t)`
-  and getters.
-- `FX_fcn.cpp`: call `_smoother.apply(...)` after the compose block and before
-  `handleOverlayDraw()`, only when active and only when `_pixels[]` was rebuilt this frame
-  (5.5). Pass `diff` as `dtMs`. Reset history in `updatePixelBuffer()` and when `bri`
-  turns on from off.
-- Under `WLED_DEBUG`: measure `micros()` around the call and print it with `DEBUG_PRINTF`
-  (no direct `Serial` calls).
-
-### WP3 - State JSON
-
-- `json.cpp`: deserialize `sm` next to `bs` (near line 408), serialize inside `includeBri`
-  (near line 650). Clamp values. Call `strip.setSmoothing()`.
-
-### WP4 - Persistent defaults (config)
-
-- `wled.h`: `smoothDefaultX`, `smoothDefaultT` (`WLED_GLOBAL ... _INIT(0)`).
-- `cfg.cpp`: read and write under `hw.led.sm`; apply at boot.
-- `set.cpp` and `xml.cpp`: settings form fields `SMX` and `SMT` (grep first that these names
-  are unused), pattern as `FR` (`set.cpp` near 215, `xml.cpp` near 365).
-
-### WP5 - Main web UI with live preview
-
-Files: `wled00/data/index.htm`, `wled00/data/index.js` (tabs, camelCase, reuse `common.js`).
-
-- Add a block to the Segments tab directly below the "Transition" and blending-style rows
-  (`index.htm`, near the `bsp` element): two range sliders "Spatial smoothing" (0..50, shown as
-  LEDs with one decimal) and "Temporal smoothing" (0..250, shown in ms). Reuse the existing
-  slider markup/classes (`noslide`, `sliderbubble`, `updateTrail`).
-- **Live:** send on `oninput` (not only `onchange`), throttled to about 15 messages per second
-  with a trailing send so the final value always arrives. Command: `requestJson({sm:{x:..., t:...}})`
-  (WebSocket when open, HTTP fallback is handled by `requestJson()`).
-- `readState(s)` (`index.js`, near the `bs` handling at line 1484): update both sliders and the
-  displayed values from `s.sm`, without sending anything back (avoid feedback loops while dragging).
-- No page reload, no save button needed. Values are RAM-only until saved in a preset (or set
-  as defaults in WP6).
-- Optional follow-up: a "Set as default" button that POSTs `{"hw":{"led":{"sm":{...}}}}` to
-  `/json/cfg` (PIN-protected if a settings PIN is set).
-- Run `npm run build` after editing. Never edit `html_*.h` or `js_*.h`.
-
-### WP6 - Settings page
-
-- `settings_leds.htm`: section "Smoothing (defaults)" with the two numeric fields and a short
-  hint that live tuning is done in the main UI.
-- Update `getMem()` so the LED memory estimate adds 16 bytes per LED when the temporal default
-  is above 0 (and mention that the runtime slider can allocate it later).
-
-### WP7 - Verification and measurement
-
-- Builds (all must compile): `esp32dev` (required), `esp32s3dev_8MB_opi`, `esp32c3dev`,
-  `lolin_s2_mini`, `nodemcuv2` (feature compiled out, no size or behaviour change), and
-  `esp32dev` with `-D WLED_DISABLE_OUTPUT_SMOOTHING`. Report flash/RAM deltas per env.
-- `npm ci && npm run build && npm test`.
-- Timing (on hardware if available, otherwise say it was not measured): microseconds per
-  `apply()` for 300, 1000 and 4096 LEDs for: spatial only, temporal only, both. Also for a 2D
-  matrix (for example 32x32). Compare with the total frame time at 42 FPS.
-- Host test of the core math (compile the filter functions with plain `g++`, keep the harness
-  in `docs/temp/`, which is gitignored): constant input stays constant, step converges to the
-  exact value for tau from 10 ms to 2.5 s at dt from 1 to 50 ms, no overflow with extreme
-  inputs, frame-rate independence (same step response at 25 and 100 FPS within tolerance).
-- Manual visual check on effects with hard edges or fast change (for example Colorloop, Chase,
-  Twinkle, Blink, Scan, a 2D effect) while moving the sliders live. Check that turning the
-  sliders to 0 gives exactly the original look.
-- State clearly in the PR what was *measured* and what was only *read from code*.
+ESP8266 / `WLED_DISABLE_GLOBAL_PIXELBUFFER` builds define `WLED_DISABLE_OUTPUT_SMOOTHING` automatically.
 
 ## 8. Memory and speed budget (estimates, not measurements)
 
-- RAM when temporal smoothing is on: 16 bytes per LED (2 stages x 8 bytes). Spatial: no full
-  buffer (at most one row in 2D).
+- RAM when a segment has temporal smoothing on: 16 bytes per strip LED for that segment's
+  history (2 stages × 8 bytes). Multiple overlapping smoothed segments each keep their own
+  history. Spatial: no full extra buffer (at most one row in 2D) plus one strip-sized
+  `SmoothWorkspace` reused across segments.
 - Time: roughly 60 to 80 cycles per LED for spatial + 2 temporal stages (instruction count
   estimate). About 0.3 ms per frame for 1000 LEDs on a 240 MHz ESP32, against 23.8 ms per
-  frame at 42 FPS. Roughly twice as slow on a 160 MHz C3. These numbers must be replaced with
-  measurements from WP7.
+  frame at 42 FPS. Roughly twice as slow on a 160 MHz C3. Replace with measured timings when
+  available.
 - PSRAM history is acceptable (sequential access), but note the slow raw PSRAM access of
   quad-SPI S2/S3 variants in the measurements.
 
@@ -325,15 +243,16 @@ Files: `wled00/data/index.htm`, `wled00/data/index.js` (tabs, camelCase, reuse `
   succeeded (RAM 26.5%, flash 84.7% of the 1.5 MB app partition) on the baseline.
 - `build_output/`, `.pio/` and the generated `wled00/html_*.h` / `js_*.h` are git-ignored.
 
-## 10. Step 2 (not part of this work): per-segment smoothing
+## 10. Per-segment semantics (implemented)
 
-Sketch only, so step 1 does not block it:
-- Add `smoothX`, `smoothT` to `Segment` (next to `blendMode`), JSON `{"seg":{"sm":{...}}}`
-  (copy/move constructors in `FX_fcn.cpp`, `serializeSegment`/`deserializeSegment`).
-- Run the filter per segment region inside `show()`, with the global value as default.
-  History stays indexed by global pixel position. Neighbour reads are clamped to the segment
-  to stop bleeding. Overlapping segments need a rule (top segment wins).
-- Add per-segment sliders next to the blend mode in the segment panel.
+- Filter each segment independently on its **mapped physical output layer** (grouping, spacing,
+  reverse, mirror, 2D transforms already applied). Spatial units remain physical LEDs.
+- Coverage marks written pixels; spatial blur stops at uncovered spacing/bounds (no cross-segment bleed).
+- After filtering, the layer is composited with the segment's Blend Mode and captured opacity.
+  Overlaps are truly independent; Blend Mode `Bottom` ignores the filtered top layer.
+- Temporal history is owned by each `Segment` (lazy), sized to the strip length while enabled.
+  Overlapping smoothed segments therefore sum history RAM.
+- A single strip-owned `SmoothWorkspace` is reused sequentially (colors + coverage).
 
 ## 11. Rules for agents working on this (from `AGENTS.md`)
 
@@ -356,7 +275,7 @@ Sketch only, so step 1 does not block it:
 
 1. Is the compile flag name `WLED_DISABLE_OUTPUT_SMOOTHING` acceptable, and should the feature
    default to enabled in release builds once flash size is known?
-2. Should realtime sources be smoothed in step 1b, and with which rule for partial updates?
+2. Should realtime sources be smoothed later, and with which rule for partial updates?
 3. Are the JSON keys `sm.x` / `sm.t` free of conflicts with WLED-Docs and known external clients?
 4. Is the spatial range of 5 LEDs sigma needed, or is a lower cap (for example 2 LEDs) enough
-   given the cost of the binomial approach?
+   given cost (binomial for `sm.x≤10`, IIR above)?

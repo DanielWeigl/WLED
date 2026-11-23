@@ -204,7 +204,15 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
       smoothDefaultX = (byte)sx;
       smoothDefaultT = (byte)st;
     }
-    strip.setSmoothing(smoothDefaultX, smoothDefaultT);
+    Segment::setSmoothDefaults(smoothDefaultX, smoothDefaultT);
+    // Apply defaults to existing segments that are still at 0/0 after boot load of empty state.
+    for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
+      Segment &seg = strip.getSegment(i);
+      if (seg.smoothSpatial == 0 && seg.smoothTemporal == 0) {
+        seg.smoothSpatial = smoothDefaultX;
+        seg.smoothTemporal = smoothDefaultT;
+      }
+    }
   }
   // AI: end
 #endif

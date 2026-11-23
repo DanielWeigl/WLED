@@ -435,7 +435,7 @@ typedef enum mapping1D2D {
 class WS2812FX;
 class FontManager;
 
-// segment, 76 bytes
+// segment, ~80 bytes (+ optional smoothing hist)
 class Segment {
   public:
     friend class FontManager; // Allow FontManager to access protected members
@@ -477,6 +477,10 @@ class Segment {
       bool    check3  : 1;        // checkmark 3
     };
     uint8_t   blendMode;          // segment blending modes: top, bottom, add, subtract, difference, average, multiply, divide, lighten, darken, screen, overlay, hardlight, softlight, dodge, burn, stencil
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    uint8_t   smoothSpatial;      // per-segment spatial smoothing (0.1 LED units, 0..SMOOTH_SPATIAL_MAX)
+    uint8_t   smoothTemporal;     // per-segment temporal smoothing (10 ms units, 0..SMOOTH_TEMPORAL_MAX)
+#endif
     char     *name;               // segment name
 
     // runtime data
@@ -490,6 +494,9 @@ class Segment {
 
   private:
     uint32_t *pixels;                 // pixel data
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    SegmentSmoothHist *_smoothHist;   // lazy temporal history (nullptr when unused)
+#endif
     unsigned _dataLen;
     uint8_t  _default_palette;        // palette number that gets assigned to pal0
     union {
@@ -512,6 +519,10 @@ class Segment {
     static CRGBPalette16 _newRandomPalette;   // target random palette
     static uint16_t      _lastPaletteChange;  // last random palette change time (in seconds)
     static uint16_t      _nextPaletteBlend;   // next due time for random palette morph (in millis())
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    static uint8_t       _defaultSmoothSpatial;  // boot/new-segment default (from cfg SMX)
+    static uint8_t       _defaultSmoothTemporal; // boot/new-segment default (from cfg SMT)
+#endif
     static bool          _modeBlend;          // mode/effect blending semaphore
     // clipping rectangle used for blending
     static uint16_t      _clipStart, _clipStop;
@@ -602,6 +613,11 @@ class Segment {
     , check2(false)
     , check3(false)
     , blendMode(0)
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    , smoothSpatial(_defaultSmoothSpatial)
+    , smoothTemporal(_defaultSmoothTemporal)
+    , _smoothHist(nullptr)
+#endif
     , name(nullptr)
     , step(0)
     , call(0)
@@ -641,6 +657,9 @@ class Segment {
       endImagePlayback(this);
       #endif
       deallocateData();
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+      delete _smoothHist; _smoothHist = nullptr;
+#endif
       p_free(pixels);
     }
 
@@ -708,6 +727,18 @@ class Segment {
       * Safe to call from interrupts and network requests.
       */
     inline Segment &markForReset() { reset = true; return *this; }  // setOption(SEG_OPTION_RESET, true)
+#ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+    inline static void setSmoothDefaults(uint8_t spatial, uint8_t temporal) {
+      _defaultSmoothSpatial = OutputSmoothing::clampSpatial(spatial);
+      _defaultSmoothTemporal = OutputSmoothing::clampTemporal(temporal);
+    }
+    inline static uint8_t getDefaultSmoothSpatial()  { return _defaultSmoothSpatial; }
+    inline static uint8_t getDefaultSmoothTemporal() { return _defaultSmoothTemporal; }
+    void resetSmoothHist();
+    void freeSmoothHist();
+    SegmentSmoothHist *ensureSmoothHist();
+    inline bool needsSmoothing() const { return smoothSpatial > 0 || smoothTemporal > 0; }
+#endif
 
     // transition has to start before actual segment values change
     // kind: low nibble = TRANSITION_KIND_* (which change triggered the transition), high nibble = TRANSITION_POWER_* flags
@@ -937,11 +968,9 @@ class WS2812FX {
     }
 
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    // Global spatial/temporal output smoothing (see docs/design/output-smoothing.md)
-    inline void setSmoothing(uint8_t spatial, uint8_t temporal) { _smoother.setTargets(spatial, temporal); }
-    inline uint8_t getSmoothSpatial()  const { return _smoother.getSpatial(); }
-    inline uint8_t getSmoothTemporal() const { return _smoother.getTemporal(); }
-    inline void resetSmoothing()             { _smoother.reset(); }
+    // Per-segment output smoothing (see docs/design/output-smoothing.md)
+    void resetAllSmoothHist();
+    void compositeSmoothLayer(const Segment &seg, SmoothWorkspace &layer) const;
 #endif
 
     void setRealtimePixelColor(unsigned i, uint32_t c);
@@ -1087,7 +1116,10 @@ class WS2812FX {
     uint8_t  *_pixelCCT;
     std::vector<Segment> _segments;
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    OutputSmoother _smoother;
+    SmoothWorkspace _smoothWs;
+    // Non-null while blendSegment() captures a mapped layer for smoothing.
+    mutable uint32_t *_layerPx = nullptr;
+    mutable uint8_t  *_layerCover = nullptr;
 #endif
 
     volatile bool _suspend;

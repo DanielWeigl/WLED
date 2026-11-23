@@ -228,6 +228,7 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
       if (st > SMOOTH_TEMPORAL_MAX) st = SMOOTH_TEMPORAL_MAX;
       smoothDefaultT = (byte)st;
     }
+    Segment::setSmoothDefaults(smoothDefaultX, smoothDefaultT);
     // AI: end
 #endif
 

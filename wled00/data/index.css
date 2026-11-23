@@ -380,20 +380,20 @@ button {
 	padding: 4px 0 0;
 }
 
-#segutil, #segutil2, #segcont, #putil, #pcont, #pql, #fx, #palw, #bsp, #sm,
+#segutil, #segutil2, #segcont, #putil, #pcont, #pql, #fx, #palw, #bsp,
 .fnd {
 	max-width: 280px;
 }
 
-/* Compact output-smoothing rows: [icon] [label] [slider] [value] */
-#sm {
-	margin: 0 auto 4px;
+/* Compact per-segment output-smoothing rows: [icon] [label] [slider] [value] */
+.seg-sm {
+	margin: 6px 0 4px;
 }
 .sm-row {
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	margin: 0 auto 2px;
+	margin: 0 0 2px;
 	padding: 0;
 }
 .sm-row .sm-icon {
