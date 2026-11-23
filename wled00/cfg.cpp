@@ -205,12 +205,16 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
       smoothDefaultT = (byte)st;
     }
     Segment::setSmoothDefaults(smoothDefaultX, smoothDefaultT);
-    // Apply defaults to existing segments that are still at 0/0 after boot load of empty state.
-    for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
-      Segment &seg = strip.getSegment(i);
-      if (seg.smoothSpatial == 0 && seg.smoothTemporal == 0) {
-        seg.smoothSpatial = smoothDefaultX;
-        seg.smoothTemporal = smoothDefaultT;
+    // Boot only: seed live 0/0 segments from defaults after empty-state load.
+    // Dynamic /json/cfg (including partial updates without hw.led.sm) must not
+    // overwrite explicit live 0/0 user settings on existing segments.
+    if (fromFS) {
+      for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
+        Segment &seg = strip.getSegment(i);
+        if (seg.smoothSpatial == 0 && seg.smoothTemporal == 0) {
+          seg.smoothSpatial = smoothDefaultX;
+          seg.smoothTemporal = smoothDefaultT;
+        }
       }
     }
   }
