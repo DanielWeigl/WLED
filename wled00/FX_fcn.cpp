@@ -50,7 +50,6 @@ uint16_t      Segment::_nextPaletteBlend  = 0; // in millis
 
 bool     Segment::_modeBlend = false;
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-uint8_t  Segment::_defaultSmoothSpatial  = 0;
 uint8_t  Segment::_defaultSmoothTemporal = 0;
 #endif
 uint16_t Segment::_clipStart = 0;

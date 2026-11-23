@@ -7,8 +7,8 @@ Read `AGENTS.md` first and follow it (see section 11).
 Implementation notes (2026-11-23, per-segment):
 - Core: `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace` (reusable mapped layer + coverage) and `SegmentSmoothHist` (per-segment temporal IIR). Spatial: binomial for `sm.x≤10`, forward+backward IIR above; coverage-aware run boundaries (no bleed across spacing/segment edges).
 - Hook: in `WS2812FX::show()`, each active segment is either blended directly or **map → filter physical layer → composite with Blend Mode**. Overlays/gamma stay after composition. Realtime passthrough skips smoothing and reseeds on exit.
-- Defaults: LED settings `SMX`/`SMT` / cfg `hw.led.sm.{x,t}` seed `Segment` construction defaults. Live values live on each segment.
-- API: `{"seg":{"id":N,"sm":{"x":...,"t":...}}}` in state/presets. Legacy root-level `sm` is accepted as migration input (applied to segments without their own `sm`) and is no longer emitted.
+- Defaults: spatial always starts at 0; LED settings `SMT` / cfg `hw.led.sm.t` may seed temporal for new segments. Live values live on each segment.
+- API: `{"seg":{"id":N,"sm":{"x":...,"t":...}}}` in state/presets. Live updates leave missing `sm` unchanged; preset/`pd` loads without `sm` reset to `0/0`. Legacy root-level `sm` is accepted as migration input (after seg deserialize) and is no longer emitted.
 - UI: Linear/Time sliders inside each expanded segment panel, after Blend Mode and before Reverse.
 
 ## 1. Goal (plain language, from the requester)
@@ -190,23 +190,25 @@ State JSON (`/json/state`, WebSocket, presets), **per segment**:
 {"seg": {"id": 0, "sm": {"x": 12, "t": 40}}}
 ```
 
-- Request: both keys optional. Missing key means "keep the current value". Missing `sm`
-  object means "unchanged" (old presets must not reset the setting).
+- Request: both keys optional. Missing key means "keep the current value".
+- Live/API: missing `sm` object means "unchanged" (partial updates).
+- Preset load (`fromPreset`, via file `presetId` or UI `pd`): missing `sm` resets that
+  segment to `0/0` so older presets without smoothing restore the previous sharp look.
 - Response: each `serializeSegment()` emits `sm.{x,t}` so presets store per-segment values.
-- Legacy root-level `{"sm":{"x":..,"t":..}}` is still accepted as a migration input and applied
-  to segments that did not send their own `sm`; it is no longer serialized.
+- Legacy root-level `{"sm":{"x":..,"t":..}}` is still accepted as a migration input (applied
+  after segment deserialize to segments that did not send their own `sm`); it is no longer serialized.
 - Segment `sm` changes do **not** set `stateChanged` (same live-drag rationale as `bs`), so
   WebSocket clients are not flooded while a slider moves. Values are still returned whenever
   state is requested (`v:true`) and are stored in presets via `serializeSegment()`.
 
-Persistent defaults (`cfg.json`, section `hw.led`):
+Persistent temporal default (`cfg.json`, section `hw.led`):
 
 ```json
-{"hw": {"led": {"sm": {"x": 0, "t": 0}}}}
+{"hw": {"led": {"sm": {"t": 0}}}}
 ```
 
-Loaded in `deserializeConfig()` (`cfg.cpp`, near the `fps` handling at line 190), written in
-`serializeConfig()` (near line 1010). Applied once at boot.
+Spatial is not configured (always 0 for new segments). Loaded in `deserializeConfig()` /
+`serializeConfig()`. Applied once at boot to segments that are still fully off.
 
 ## 7. Implementation map (as landed)
 
@@ -216,7 +218,7 @@ Loaded in `deserializeConfig()` (`cfg.cpp`, near the `fps` handling at line 190)
 | Segment fields / hist lifecycle | `Segment::smoothSpatial` / `smoothTemporal` + `_smoothHist` in `FX.h` / `FX_fcn.cpp` |
 | Render path | `blendSegment()` layer capture via `putPixel`; per-segment map→filter→`compositeSmoothLayer()` in `show()` |
 | State / presets | `serializeSegment` / `deserializeSegment` `sm.{x,t}`; optional root `sm` migration in `deserializeState` |
-| Boot defaults | `smoothDefaultX/T` in `wled.h`, cfg `hw.led.sm`, settings `SMX`/`SMT`, `Segment::setSmoothDefaults()` |
+| Boot defaults | Spatial always 0; `smoothDefaultT` / settings `SMT` / cfg `hw.led.sm.t` via `Segment::setDefaultSmoothTemporal()` |
 | UI | Per-segment Linear/Time rows in `populateSegments()` (`index.js` / `index.css`); pointer-locked drag updates |
 
 ESP8266 / `WLED_DISABLE_GLOBAL_PIXELBUFFER` builds define `WLED_DISABLE_OUTPUT_SMOOTHING` automatically.

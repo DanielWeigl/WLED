@@ -2585,9 +2585,13 @@ function smPointerBegin()
 function smPointerEnd()
 {
 	smPointerDown = false;
-	// Safety: if no matching echo arrives, unlock panel rebuilds after a short wait.
+	// Safety: if no matching echo arrives, unlock and refresh so a later preset/state
+	// change cannot leave stale slider positions on screen.
 	if (smSettleTimer) clearTimeout(smSettleTimer);
-	smSettleTimer = setTimeout(()=>{ smDirty = false; smDragSeg = -1; smSettleTimer = null; }, 2000);
+	smSettleTimer = setTimeout(()=>{
+		clearSmoothDrag();
+		requestJson(); // pull state and rebuild segments if needed
+	}, 2000);
 }
 function flushSmoothPending()
 {
@@ -2665,6 +2669,8 @@ function setLor(i)
 
 function setPreset(i)
 {
+	// Drop smoothing drag lock so populateSegments can show preset sm (incl. 0/0).
+	clearSmoothDrag();
 	var obj = {"ps":i};
 	if (!isPlaylist(i) && pJson && pJson[i] && (!pJson[i].win || pJson[i].win.indexOf("Please") <= 0)) {
 		// we will send the complete preset content as to avoid delay introduced by
