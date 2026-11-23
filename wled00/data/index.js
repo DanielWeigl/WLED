@@ -2563,7 +2563,9 @@ function formatSmoothLabel(segId, ch, pos)
 }
 function smoothEchoMatches(s)
 {
-	if (smDragSeg < 0 || !s || !Array.isArray(s.seg)) return false;
+	// An echo of the last-sent value must not settle the drag while a newer local
+	// value is still queued (e.g. Linear retained after a subsequent Time edit).
+	if (smDragSeg < 0 || smPendingBySeg[smDragSeg] || !s || !Array.isArray(s.seg)) return false;
 	for (const seg of s.seg) {
 		if ((seg.id|0) !== smDragSeg) continue;
 		const sm = seg.sm || {};
