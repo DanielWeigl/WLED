@@ -366,6 +366,10 @@ void getSettingsJS(byte subPage, Print& settingsScript)
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
     printSetFormValue(settingsScript,PSTR("SMX"),smoothDefaultX);
     printSetFormValue(settingsScript,PSTR("SMT"),smoothDefaultT);
+#else
+    // Builds without output smoothing: hide + disable SMX/SMT so empty required
+    // fields do not block Save, and empty values are not submitted over defaults.
+    settingsScript.print(F("toggle('Smoothing');if(d.Sf.SMX){d.Sf.SMX.disabled=true;d.Sf.SMX.required=false;}if(d.Sf.SMT){d.Sf.SMT.disabled=true;d.Sf.SMT.required=false;}"));
 #endif
     printSetFormValue(settingsScript,PSTR("AW"),Bus::getGlobalAWMode());
 
