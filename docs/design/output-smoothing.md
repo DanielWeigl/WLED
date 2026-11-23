@@ -144,11 +144,11 @@ output   = round(stage2)
 - **Guarantee convergence:** if `diff != 0` and the computed step is 0, step by +-1 (in 8.8
   units). Otherwise small alpha (long tau, high FPS) leaves a permanent error.
 - Rounding: `out = (state + 128) >> 8`.
-- State layout: per pixel and stage **two `uint32_t`** (`R | G << 16` and `B | W << 16`), always
-  accessed as 32-bit words. This keeps the buffer valid in the classic-ESP32 32-bit-only
-  region (`BFRALLOC_NOBYTEACCESS`).
-- Memory: 8 bytes per LED per stage, so **16 bytes per LED with 2 stages** (16 KB at 1000 LEDs,
-  64 KB at 4096 LEDs). Allocate only while `sm.t > 0`; free when it returns to 0.
+- State layout: always 32-bit words (classic-ESP32 `BFRALLOC_NOBYTEACCESS`):
+  - **RGBW:** 4 words/LED = 16 B — `[R1|G1][B1|W1][R2|G2][B2|W2]`
+  - **RGB** (`!hasWhiteChannel()`): 3 words/LED = 12 B — `[R1|G1][B1|R2][G2|B2]` (W omitted)
+- Memory: **12 bytes/LED (RGB) or 16 bytes/LED (RGBW)** with 2 stages. Allocate only while
+  `sm.t > 0`; free when it returns to 0.
 
 ### 4.5 Order and fusion
 
@@ -236,9 +236,9 @@ ESP8266 / `WLED_DISABLE_GLOBAL_PIXELBUFFER` builds define `WLED_DISABLE_OUTPUT_S
 
 ## 8. Memory and speed budget (estimates, not measurements)
 
-- RAM when a segment of length N has temporal smoothing on: **16 × N** bytes history
-  (2 stages × 8 bytes), not 16 × strip length. Multiple overlapping smoothed segments each
-  keep their own history sized to that segment. Workspace: one reusable buffer of
+- RAM when a segment of length N has temporal smoothing on: **12 × N** (RGB) or **16 × N**
+  (RGBW) bytes history, not strip length. Multiple overlapping smoothed segments each keep
+  their own history sized to that segment. Workspace: one reusable buffer of
   **5 × max(N)** among currently smoothed segments (4 B color + 1 B coverage); freed when
   none need smoothing.
 - Time: filter cost scales with segment length N, not strip length. Roughly 60 to 80 cycles

@@ -19,7 +19,6 @@
 // Temporal: sm.t unit is 10 ms (tau), 0..100 → 0..1000 ms.
 constexpr uint8_t SMOOTH_SPATIAL_MAX  = 50;
 constexpr uint8_t SMOOTH_TEMPORAL_MAX = 100;
-constexpr unsigned SMOOTH_TEMPORAL_STAGES = 2;
 // Binomial [1 2 1]/4 for small sigma only (spatial <= this → cheap 0..2 full passes).
 // Above: forward+backward IIR keeps cost fixed at 2 passes per axis for any sigma.
 constexpr uint8_t SMOOTH_SPATIAL_BINOMIAL_MAX = 10;
@@ -51,6 +50,9 @@ class SmoothWorkspace {
 
 // Per-segment temporal IIR history (8.8 fixed-point, 2 stages). Owned by Segment.
 // Bulk buffer length == that segment's length() while smoothTemporal > 0; freed when off.
+// Layout is always 32-bit words (classic-ESP32 NOBYTEACCESS-safe):
+//   RGBW: 4 words/LED = 16 B — [R1|G1][B1|W1][R2|G2][B2|W2]
+//   RGB:  3 words/LED = 12 B — [R1|G1][B1|R2][G2|B2]  (W omitted)
 class SegmentSmoothHist {
   public:
     SegmentSmoothHist() = default;
@@ -63,20 +65,22 @@ class SegmentSmoothHist {
     void reset() { _needsReset = true; }
     void freeHistory();
     inline bool isAllocated() const { return _hist != nullptr; }
-    inline size_t memoryUsed() const { return _histLen * SMOOTH_TEMPORAL_STAGES * 2 * sizeof(uint32_t); }
+    inline size_t memoryUsed() const { return _histLen * (size_t)_wordsPerPx * sizeof(uint32_t); }
 
     // Filter px in place for covered pixels. Uncovered pixels are left unchanged and their history is ignored.
     // len must be the segment physical length (same as workspace).
+    // processW selects RGBW (16 B/LED) vs RGB (12 B/LED) history packing.
     void apply(uint32_t *px, const uint8_t *cover, unsigned len, uint8_t temporal, unsigned dtMs, bool processW);
 
   private:
-    void ensureHistory(unsigned len);
-    void seedHistory(const uint32_t *px, const uint8_t *cover, unsigned len);
+    void ensureHistory(unsigned len, bool processW);
+    void seedHistory(const uint32_t *px, const uint8_t *cover, unsigned len, bool processW);
 
     bool     _needsReset = true;
     bool     _allocFailed = false;
+    bool     _processW = false;
+    uint8_t  _wordsPerPx = 3; // 3 = RGB, 4 = RGBW
     unsigned _histLen = 0;
-    // Per pixel, per stage: two uint32_t packing R|G<<16 and B|W<<16 as 8.8 fixed-point.
     uint32_t *_hist = nullptr;
 };
 

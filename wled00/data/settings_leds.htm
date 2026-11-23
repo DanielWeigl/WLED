@@ -322,8 +322,8 @@
 			if (isAna(t)) return 5;	// analog
 			let len = parseInt(d.Sf["LC"+n].value) + parseInt(d.Sf["SL"+n].value);
 			let pbfr = len * 8; // pixel buffers: global buffer + segment buffer
-			// Per-segment temporal history: 2 stages × 8 bytes/LED while default SMT > 0.
-			// Overlapping smoothed segments can each keep their own history (sum of areas).
+			// Per-segment temporal history while default SMT > 0: ~12 B/LED RGB, 16 B/LED RGBW.
+			// Use 16 as worst-case for the memory estimate. Overlapping smoothed segments add up.
 			let smt = d.Sf.SMT ? parseInt(d.Sf.SMT.value)||0 : 0;
 			if (smt > 0) pbfr += len * 16;
 			let ch = getChannels(t, n);
@@ -1410,7 +1410,7 @@ Swap: <select id="xw${s}" name="XW${s}">
 		Smoothing defaults for new segments (applied at boot; live per-segment tuning is in each Segments panel):<br>
 		Spatial: <input type="number" class="s" min="0" max="50" name="SMX" oninput="UI()" required> (0.1 LED, 0–50 = 0–5 LEDs)<br>
 		Temporal: <input type="number" class="s" min="0" max="100" name="SMT" oninput="UI()" required> (10 ms, 0–100 = 0–1000 ms)<br>
-		<small>Each segment with temporal smoothing uses ~16 bytes per LED of that segment's length (not the full strip). A reusable mapped layer adds ~5 bytes per LED of the largest smoothed segment.</small><br>
+		<small>Each segment with temporal smoothing uses ~12 bytes/LED (RGB) or ~16 bytes/LED (RGBW) of that segment's length. A reusable mapped layer adds ~5 bytes per LED of the largest smoothed segment.</small><br>
 		</div>
 		<br><br>
 	</div>

@@ -63,42 +63,54 @@ void SegmentSmoothHist::freeHistory() {
   p_free(_hist);
   _hist = nullptr;
   _histLen = 0;
+  _wordsPerPx = 3;
+  _processW = false;
 }
 
-void SegmentSmoothHist::ensureHistory(unsigned len) {
-  if (_hist && _histLen == len) return;
+void SegmentSmoothHist::ensureHistory(unsigned len, bool processW) {
+  const uint8_t words = processW ? 4 : 3;
+  if (_hist && _histLen == len && _wordsPerPx == words) return;
   freeHistory();
   if (len == 0) return;
-  size_t bytes = (size_t)len * SMOOTH_TEMPORAL_STAGES * 2 * sizeof(uint32_t);
+  size_t bytes = (size_t)len * words * sizeof(uint32_t);
   _hist = static_cast<uint32_t*>(allocate_buffer(bytes, BFRALLOC_NOBYTEACCESS | BFRALLOC_PREFER_PSRAM | BFRALLOC_CLEAR));
   if (!_hist) {
     _allocFailed = true;
     errorFlag = ERR_NORAM_PX;
-    DEBUG_PRINTF_P(PSTR("SegmentSmoothHist: alloc failed (%u B)\n"), (unsigned)bytes);
+    DEBUG_PRINTF_P(PSTR("SegmentSmoothHist: alloc failed (%u B, %u w/px)\n"), (unsigned)bytes, (unsigned)words);
     return;
   }
   _histLen = len;
+  _wordsPerPx = words;
+  _processW = processW;
   _needsReset = true;
   _allocFailed = false;
 }
 
-void SegmentSmoothHist::seedHistory(const uint32_t *px, const uint8_t *cover, unsigned len) {
+void SegmentSmoothHist::seedHistory(const uint32_t *px, const uint8_t *cover, unsigned len, bool processW) {
   if (!_hist || len > _histLen) return;
+  const unsigned stride = _wordsPerPx;
   for (unsigned i = 0; i < len; i++) {
+    uint32_t *h = _hist + i * stride;
     if (!isCovered(cover, i)) {
-      _hist[i * 4 + 0] = 0;
-      _hist[i * 4 + 1] = 0;
-      _hist[i * 4 + 2] = 0;
-      _hist[i * 4 + 3] = 0;
+      h[0] = h[1] = h[2] = 0;
+      if (processW) h[3] = 0;
       continue;
     }
     uint32_t c = px[i];
-    uint32_t rg = chTo88(R(c)) | (chTo88(G(c)) << 16);
-    uint32_t bw = chTo88(B(c)) | (chTo88(W(c)) << 16);
-    _hist[i * 4 + 0] = rg;
-    _hist[i * 4 + 1] = bw;
-    _hist[i * 4 + 2] = rg;
-    _hist[i * 4 + 3] = bw;
+    uint32_t r = chTo88(R(c)), g = chTo88(G(c)), b = chTo88(B(c));
+    if (processW) {
+      uint32_t w = chTo88(W(c));
+      h[0] = r | (g << 16);
+      h[1] = b | (w << 16);
+      h[2] = h[0];
+      h[3] = h[1];
+    } else {
+      // [R1|G1][B1|R2][G2|B2]
+      h[0] = r | (g << 16);
+      h[1] = b | (r << 16);
+      h[2] = g | (b << 16);
+    }
   }
   _needsReset = false;
 }
@@ -264,20 +276,30 @@ void SegmentSmoothHist::apply(uint32_t *px, const uint8_t *cover, unsigned len, 
   }
   if (!px || len == 0 || _allocFailed) return;
 
-  ensureHistory(len);
+  ensureHistory(len, processW);
   if (!_hist) return;
-  if (_needsReset || _histLen != len) {
-    seedHistory(px, cover, len);
+  if (_needsReset || _histLen != len || _processW != processW) {
+    seedHistory(px, cover, len, processW);
     return; // first frame after seed: emit input unchanged
   }
+
+  const unsigned stride = _wordsPerPx;
 
   if (dtMs == 0) {
     for (unsigned i = 0; i < len; i++) {
       if (!isCovered(cover, i)) continue;
-      uint32_t rg2 = _hist[i * 4 + 2];
-      uint32_t bw2 = _hist[i * 4 + 3];
-      px[i] = RGBW32(((rg2 & 0xFFFF) + 128) >> 8, ((rg2 >> 16) + 128) >> 8,
-                     ((bw2 & 0xFFFF) + 128) >> 8, ((bw2 >> 16) + 128) >> 8);
+      const uint32_t *h = _hist + i * stride;
+      if (processW) {
+        uint32_t rg2 = h[2], bw2 = h[3];
+        px[i] = RGBW32(((rg2 & 0xFFFF) + 128) >> 8, ((rg2 >> 16) + 128) >> 8,
+                       ((bw2 & 0xFFFF) + 128) >> 8, ((bw2 >> 16) + 128) >> 8);
+      } else {
+        // stage2: R in high half of [1], G|B in [2]
+        uint16_t r2 = (uint16_t)(h[1] >> 16);
+        uint16_t g2 = (uint16_t)(h[2] & 0xFFFF);
+        uint16_t b2 = (uint16_t)(h[2] >> 16);
+        px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8, W(px[i]));
+      }
     }
     return;
   }
@@ -296,33 +318,37 @@ void SegmentSmoothHist::apply(uint32_t *px, const uint8_t *cover, unsigned len, 
     uint16_t rT = chTo88(R(c));
     uint16_t gT = chTo88(G(c));
     uint16_t bT = chTo88(B(c));
+    uint32_t *h = _hist + i * stride;
 
-    uint32_t rg1 = _hist[i * 4 + 0];
-    uint32_t bw1 = _hist[i * 4 + 1];
-    uint16_t r1 = iirStep((uint16_t)(rg1 & 0xFFFF), rT, alphaQ15);
-    uint16_t g1 = iirStep((uint16_t)(rg1 >> 16),    gT, alphaQ15);
-    uint16_t b1 = iirStep((uint16_t)(bw1 & 0xFFFF), bT, alphaQ15);
-    uint16_t w1;
     if (processW) {
       uint16_t wT = chTo88(W(c));
-      w1 = iirStep((uint16_t)(bw1 >> 16), wT, alphaQ15);
+      uint16_t r1 = iirStep((uint16_t)(h[0] & 0xFFFF), rT, alphaQ15);
+      uint16_t g1 = iirStep((uint16_t)(h[0] >> 16),    gT, alphaQ15);
+      uint16_t b1 = iirStep((uint16_t)(h[1] & 0xFFFF), bT, alphaQ15);
+      uint16_t w1 = iirStep((uint16_t)(h[1] >> 16),    wT, alphaQ15);
+      h[0] = (uint32_t)r1 | ((uint32_t)g1 << 16);
+      h[1] = (uint32_t)b1 | ((uint32_t)w1 << 16);
+
+      uint16_t r2 = iirStep((uint16_t)(h[2] & 0xFFFF), r1, alphaQ15);
+      uint16_t g2 = iirStep((uint16_t)(h[2] >> 16),    g1, alphaQ15);
+      uint16_t b2 = iirStep((uint16_t)(h[3] & 0xFFFF), b1, alphaQ15);
+      uint16_t w2 = iirStep((uint16_t)(h[3] >> 16),    w1, alphaQ15);
+      h[2] = (uint32_t)r2 | ((uint32_t)g2 << 16);
+      h[3] = (uint32_t)b2 | ((uint32_t)w2 << 16);
+      px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8, (w2 + 128) >> 8);
     } else {
-      w1 = (uint16_t)(bw1 >> 16);
+      // [R1|G1][B1|R2][G2|B2]
+      uint16_t r1 = iirStep((uint16_t)(h[0] & 0xFFFF), rT, alphaQ15);
+      uint16_t g1 = iirStep((uint16_t)(h[0] >> 16),    gT, alphaQ15);
+      uint16_t b1 = iirStep((uint16_t)(h[1] & 0xFFFF), bT, alphaQ15);
+      uint16_t r2 = iirStep((uint16_t)(h[1] >> 16),    r1, alphaQ15);
+      uint16_t g2 = iirStep((uint16_t)(h[2] & 0xFFFF), g1, alphaQ15);
+      uint16_t b2 = iirStep((uint16_t)(h[2] >> 16),    b1, alphaQ15);
+      h[0] = (uint32_t)r1 | ((uint32_t)g1 << 16);
+      h[1] = (uint32_t)b1 | ((uint32_t)r2 << 16);
+      h[2] = (uint32_t)g2 | ((uint32_t)b2 << 16);
+      px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8, W(c));
     }
-    _hist[i * 4 + 0] = (uint32_t)r1 | ((uint32_t)g1 << 16);
-    _hist[i * 4 + 1] = (uint32_t)b1 | ((uint32_t)w1 << 16);
-
-    uint32_t rg2 = _hist[i * 4 + 2];
-    uint32_t bw2 = _hist[i * 4 + 3];
-    uint16_t r2 = iirStep((uint16_t)(rg2 & 0xFFFF), r1, alphaQ15);
-    uint16_t g2 = iirStep((uint16_t)(rg2 >> 16),    g1, alphaQ15);
-    uint16_t b2 = iirStep((uint16_t)(bw2 & 0xFFFF), b1, alphaQ15);
-    uint16_t w2 = processW ? iirStep((uint16_t)(bw2 >> 16), w1, alphaQ15) : (uint16_t)(bw2 >> 16);
-    _hist[i * 4 + 2] = (uint32_t)r2 | ((uint32_t)g2 << 16);
-    _hist[i * 4 + 3] = (uint32_t)b2 | ((uint32_t)w2 << 16);
-
-    px[i] = RGBW32((r2 + 128) >> 8, (g2 + 128) >> 8, (b2 + 128) >> 8,
-                   processW ? ((w2 + 128) >> 8) : W(c));
   }
 }
 
