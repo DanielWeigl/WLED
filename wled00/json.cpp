@@ -536,6 +536,10 @@ bool deserializeState(JsonObject root, byte callMode, byte presetId)
   {
     JsonObject smRoot = root[F("sm")];
     if (!smRoot.isNull()) {
+      // Same suspend contract as seg updates: avoid mutating smoothing / freeing
+      // history while show() may be filtering. Covers root-only sm requests too.
+      strip.suspend();
+      strip.waitForIt();
       uint8_t sx = 0;
       uint8_t st = 0;
       if (!smRoot["x"].isNull()) sx = OutputSmoothing::clampSpatial(smRoot["x"] | 0);
@@ -573,6 +577,7 @@ bool deserializeState(JsonObject root, byte callMode, byte presetId)
         seg.smoothTemporal = st;
         if (st == 0) seg.freeSmoothHist();
       }
+      strip.resume();
     }
   }
   // AI: end
