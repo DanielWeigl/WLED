@@ -2027,6 +2027,10 @@ void WS2812FX::show() {
     // Segments without smoothing keep the direct blendSegment() path.
     {
       bool anySmooth = false;
+      // Reseed all segments before clearing off/passthrough flags so skipped or
+      // OOM-fallback segments keep a pending history reset until their next filter pass.
+      const bool reseedSmooth = (bri != 0) && (smoothWasOff || smoothWasPassthrough);
+      if (reseedSmooth) resetAllSmoothHist();
       for (Segment &seg : _segments) {
         if (!seg.isActive() || (!seg.on && !seg.isInTransition())) {
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
@@ -2047,7 +2051,7 @@ void WS2812FX::show() {
           continue;
         }
         if (!_smoothWs.ensure(totalLen)) {
-          blendSegment(seg); // OOM → unfiltered fallback
+          blendSegment(seg); // OOM → unfiltered fallback; _needsReset kept for next pass
           continue;
         }
         _smoothWs.clear(totalLen);
@@ -2056,8 +2060,6 @@ void WS2812FX::show() {
         blendSegment(seg); // capture mapped source colors + opacity into layer
         _layerPx = nullptr;
         _layerCover = nullptr;
-
-        if (smoothWasOff || smoothWasPassthrough) seg.resetSmoothHist();
 
         unsigned width = isMatrix ? Segment::maxWidth : totalLen;
         unsigned height = isMatrix ? Segment::maxHeight : 1;
