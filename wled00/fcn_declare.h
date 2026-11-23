@@ -303,6 +303,10 @@ uint16_t getRolloverMillis();
 //udp.cpp
 void notify(byte callMode, bool followUp=false);
 uint8_t realtimeBroadcast(uint8_t type, IPAddress client, uint16_t length, const uint8_t* buffer, uint8_t bri=255, bool isRGBW=false);
+#ifdef WLED_ENABLE_FRAME_DUMP
+//frame_dump.cpp — UDP broadcast of each show() frame (RGBW) for desktop analysis
+void frameDumpBroadcast(bool applyGamma);
+#endif
 void realtimeLock(uint32_t timeoutMs, byte md = REALTIME_MODE_GENERIC);
 void exitRealtime();
 void handleNotifications();

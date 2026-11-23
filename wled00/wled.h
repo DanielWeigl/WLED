@@ -57,6 +57,10 @@
 // to toggle usb serial debug (un)comment the following line
 //#define WLED_DEBUG
 
+// UDP broadcast of every show() frame as RGBW (see wled00/frame_dump.cpp, tools/frame_dump_viewer.py)
+//#define WLED_ENABLE_FRAME_DUMP
+//#define WLED_FRAME_DUMP_PORT 4210
+
 // filesystem specific debugging
 //#define WLED_DEBUG_FS
 

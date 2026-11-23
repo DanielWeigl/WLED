@@ -1981,6 +1981,10 @@ void WS2812FX::show() {
   Bus::setCCT(oldCCT);
   #endif
 
+  #ifdef WLED_ENABLE_FRAME_DUMP
+  frameDumpBroadcast(useGammaCorrection);
+  #endif
+
   // pass the pixels on to the buses and start sending them out
   BusManager::show();
 
