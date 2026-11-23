@@ -540,13 +540,31 @@ bool deserializeState(JsonObject root, byte callMode, byte presetId)
       uint8_t st = 0;
       if (!smRoot["x"].isNull()) sx = OutputSmoothing::clampSpatial(smRoot["x"] | 0);
       if (!smRoot["t"].isNull()) st = OutputSmoothing::clampTemporal(smRoot["t"] | 0);
-      JsonArray segs = root["seg"];
+      JsonVariant segVar = root["seg"];
       for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
         Segment &seg = strip.getSegment(i);
+        // Match deserializeSegment targeting: array index if no id; object-form
+        // applies to id or to all selected segments when id is omitted.
         bool hasOwn = false;
-        if (!segs.isNull()) {
-          for (JsonObject el : segs) {
-            if ((el["id"] | i) == i && !el[F("sm")].isNull()) { hasOwn = true; break; }
+        if (!segVar.isNull()) {
+          if (segVar.is<JsonObject>()) {
+            JsonObject el = segVar.as<JsonObject>();
+            if (!el[F("sm")].isNull()) {
+              int id = el["id"] | -1;
+              if (id < 0) {
+                if (seg.isActive() && seg.isSelected()) hasOwn = true;
+              } else if ((size_t)id == i) {
+                hasOwn = true;
+              }
+            }
+          } else if (segVar.is<JsonArray>()) {
+            JsonArray segs = segVar.as<JsonArray>();
+            size_t idx = 0;
+            for (JsonObject el : segs) {
+              size_t target = el["id"] | idx;
+              if (target == i && !el[F("sm")].isNull()) { hasOwn = true; break; }
+              idx++;
+            }
           }
         }
         if (hasOwn) continue;
