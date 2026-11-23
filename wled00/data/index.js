@@ -752,6 +752,8 @@ function populateSegments(s)
 	var cn = "";
 	let li = lastinfo;
 	segCount = 0; lowestUnused = 0; lSeg = 0;
+	// Firmware omits seg.sm when built with WLED_DISABLE_OUTPUT_SMOOTHING.
+	const hasSmooth = (s.seg || []).some(seg => seg.sm != null);
 
 	for (var inst of (s.seg||[])) {
 		segCount++;
@@ -877,7 +879,7 @@ function populateSegments(s)
 					`</table>`+
 					`<div class="h bp" id="seg${i}len"></div>`+
 					blend +
-					(()=>{
+					(hasSmooth ? (()=>{
 						let sx = (inst.sm && inst.sm.x!=null) ? parseInt(inst.sm.x)||0 : 0;
 						let st = (inst.sm && inst.sm.t!=null) ? parseInt(inst.sm.t)||0 : 0;
 						let px = smSpatialToPos(sx / 10);
@@ -903,7 +905,7 @@ function populateSegments(s)
 								`<output class="sliderbubble" id="seg${i}smtOut">${Math.round(smPosToMs(pt))} ms</output>`+
 							`</div>`+
 						`</div></div>`;
-					})() +
+					})() : '') +
 					(!isMSeg ? rvXck : '') +
 					(isMSeg&&stoY-staY>1&&stoX-staX>1 ? map2D : '') +
 					(s.AudioReactive && s.AudioReactive.on ? "" : sndSim) +
