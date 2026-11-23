@@ -1410,7 +1410,7 @@ Swap: <select id="xw${s}" name="XW${s}">
 		Smoothing defaults for new segments (applied at boot; live per-segment tuning is in each Segments panel):<br>
 		Spatial: <input type="number" class="s" min="0" max="50" name="SMX" oninput="UI()" required> (0.1 LED, 0–50 = 0–5 LEDs)<br>
 		Temporal: <input type="number" class="s" min="0" max="100" name="SMT" oninput="UI()" required> (10 ms, 0–100 = 0–1000 ms)<br>
-		<small>Each segment with temporal smoothing uses ~16 bytes/LED of history. Overlapping smoothed segments add up. A reusable mapped layer adds ~5 bytes/LED while any segment is smoothed.</small><br>
+		<small>Each segment with temporal smoothing uses ~16 bytes per LED of that segment's length (not the full strip). A reusable mapped layer adds ~5 bytes per LED of the largest smoothed segment.</small><br>
 		</div>
 		<br><br>
 	</div>

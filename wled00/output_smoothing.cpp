@@ -53,12 +53,6 @@ bool SmoothWorkspace::ensure(unsigned len) {
   return true;
 }
 
-void SmoothWorkspace::clear(unsigned len) {
-  if (!_px || !_cover || len == 0 || len > _capacity) return;
-  memset(_px, 0, (size_t)len * sizeof(uint32_t));
-  memset(_cover, 0, (size_t)len * sizeof(uint8_t));
-}
-
 void SmoothWorkspace::freeBuffers() {
   p_free(_px); _px = nullptr;
   p_free(_cover); _cover = nullptr;
@@ -292,10 +286,8 @@ void SegmentSmoothHist::apply(uint32_t *px, const uint8_t *cover, unsigned len, 
   if (tauStage == 0) tauStage = 1;
   if (dtMs > 250) dtMs = 250;
 
-  float alphaF = 1.0f - expf(-(float)dtMs / (float)tauStage);
-  if (alphaF < 0.0f) alphaF = 0.0f;
-  if (alphaF > 1.0f) alphaF = 1.0f;
-  uint16_t alphaQ15 = (uint16_t)(alphaF * 32768.0f + 0.5f);
+  // Integer alpha ≈ dt/(tau+dt) in Q15 — avoids per-frame expf on the hot path.
+  uint16_t alphaQ15 = (uint16_t)(((uint32_t)dtMs << 15) / (tauStage + dtMs));
   if (alphaQ15 > 32768) alphaQ15 = 32768;
 
   for (unsigned i = 0; i < len; i++) {

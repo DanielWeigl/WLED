@@ -970,6 +970,9 @@ class WS2812FX {
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
     // Per-segment output smoothing (see docs/design/output-smoothing.md)
     void resetAllSmoothHist();
+    // Map → filter (seg.length() workspace) → composite. false = caller should blendSegment().
+    bool smoothAndCompositeSegment(Segment &seg, unsigned dtMs);
+    void mapSegmentToLocalLayer(const Segment &seg, uint32_t *px, uint8_t *cover, uint8_t opacity) const;
     void compositeSmoothLayer(const Segment &seg, SmoothWorkspace &layer) const;
 #endif
 
@@ -1116,10 +1119,7 @@ class WS2812FX {
     uint8_t  *_pixelCCT;
     std::vector<Segment> _segments;
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    SmoothWorkspace _smoothWs;
-    // Non-null while blendSegment() captures a mapped layer for smoothing.
-    mutable uint32_t *_layerPx = nullptr;
-    mutable uint8_t  *_layerCover = nullptr;
+    SmoothWorkspace _smoothWs; // reusable seg-local scratch (grows to max smoothed seg.length())
 #endif
 
     volatile bool _suspend;

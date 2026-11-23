@@ -4,12 +4,13 @@ Status: **implemented on branch** (per-segment smoothing). Built/OTA-tested on `
 Branch: `feature/output-smoothing` (vs `main`).
 Read `AGENTS.md` first and follow it (see section 11).
 
-Implementation notes (2026-11-23, per-segment):
-- Core: `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace` (reusable mapped layer + coverage) and `SegmentSmoothHist` (per-segment temporal IIR). Spatial: binomial for `sm.x≤10`, forward+backward IIR above; coverage-aware run boundaries (no bleed across spacing/segment edges).
-- Hook: in `WS2812FX::show()`, each active segment is either blended directly or **map → filter physical layer → composite with Blend Mode**. Overlays/gamma stay after composition. Realtime passthrough skips smoothing and reseeds on exit.
+Implementation notes (2026-11-23, contained rewrite):
+- Core: `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace` (reusable seg-local layer + coverage) and `SegmentSmoothHist` (per-segment temporal IIR). Spatial: binomial for `sm.x≤10`, forward+backward IIR above; coverage-aware run boundaries (no bleed across spacing/segment edges).
+- Hook: `blendSegment()` is **unchanged** (no putPixel capture). In `show()`, unsmoothed segments call stock `blendSegment()`; smoothed segments call isolated `smoothAndCompositeSegment()` (map → filter → composite). Buffers sized to `seg.length()`, not strip length. Transitions and `bri==0` use stock blend. Realtime passthrough skips smoothing and reseeds on exit.
 - Defaults: LED settings `SMX`/`SMT` / cfg `hw.led.sm.{x,t}` seed `Segment` construction defaults. Live values live on each segment.
 - API: `{"seg":{"id":N,"sm":{"x":...,"t":...}}}` in state/presets. Live updates leave missing `sm` unchanged; preset/`pd` loads without `sm` reset to `0/0`. Legacy root-level `sm` is accepted as migration input (after seg deserialize) and is no longer emitted.
 - UI: Linear/Time sliders inside each expanded segment panel, after Blend Mode and before Reverse.
+- Containment goal (see #5189 / #5202 discussion): treat smoothing as a segment composition property; do not teach FX code about the framebuffer; keep the stock blend hot path private.
 
 ## 1. Goal (plain language, from the requester)
 
@@ -70,12 +71,20 @@ slider), not only after a save.
 
 ### 4.1 Insert point
 
-Per active segment in `WS2812FX::show()`: map into a reusable physical layer, filter that
-layer, then composite into `_pixels[]` with Blend Mode. Overlays run after all segments
-are composed; gamma stays after overlays.
+Per active segment in `WS2812FX::show()`:
+
+- If smoothing is off / in transition / power off → stock `blendSegment()` only (one bool check).
+- If smoothing is on → `smoothAndCompositeSegment()`: dedicated local mapper into a
+  `seg.length()`-sized layer, filter, then composite with Blend Mode into `_pixels[]`.
+
+`blendSegment()` itself has no smoothing branches. Overlays run after all segments are
+composed; gamma stays after overlays.
 
 ```text
-effects -> Segment::pixels -> map to physical layer -> [ SEGMENT SMOOTHING ] -> Blend Mode into _pixels[] -> overlay -> gamma -> bus
+effects -> Segment::pixels
+  ├─ (no smooth) blendSegment → _pixels
+  └─ (smooth)    map local layer → [ SEGMENT SMOOTHING ] → Blend Mode into _pixels
+→ overlay → gamma → bus
 ```
 
 ### 4.2 Parameters (stable contract, units are physical on purpose)
@@ -90,9 +99,8 @@ Values above the range are clamped. Both 0 means the feature is fully off.
 ### 4.3 Spatial filter
 
 - Separable: horizontal pass, then vertical pass for 2D.
-- 1D (`!strip.isMatrix`): one pass over `totalLen`.
-- 2D: passes over the matrix region (`maxWidth * maxHeight`). If `totalLen` is larger than
-  the matrix, treat the tail as 1D. Check how `FX_2Dfcn.cpp` sets `_length` and `isMatrix`.
+- 1D (`!strip.isMatrix`): one pass over the segment's physical `length()` (`stop - start`).
+- 2D: passes over the segment rectangle (`width * height` = `seg.length()`), not the full matrix.
 - Kernel candidates (the implementing agent decides after measuring, see 7.2):
   - repeated 3-tap binomial `[1 2 1]/4`. One pass has variance 0.5. A fractional pass
     `[w/4, 1-w/2, w/4]` has variance `w/2`, so any sigma is reachable with n full passes
@@ -127,8 +135,8 @@ output   = round(stage2)
 - `dt` comes from `show()` (`diff`). This makes the smoothing independent of FPS, including
   unlimited FPS mode and irregular frame times. Clamp dt to 1..250 ms. If dt is 0, skip the
   temporal update and output the current state.
-- `expf()` once or twice per frame is fine. `alpha = dt / (tauStage + dt)` is an acceptable
-  cheaper alternative (document which one is used).
+- Temporal uses integer `alpha = dt / (tauStage + dt)` in Q15 (no per-frame `expf` on the
+  temporal hot path). Spatial IIR above the binomial cap still uses `expf` once per apply.
 - **State precision: 16 bits per channel (8.8 fixed point), 4 channels (RGBW).** 8-bit state
   stalls short of the target (faint ghost glow, never reaching black).
 - Fixed-point math: keep `alpha` as Q15 (0..32768). Check for signed 32-bit overflow:
@@ -156,31 +164,34 @@ choice. Note it in the code comments.
 
 ## 5. Behaviour and edge cases (must be handled)
 
-1. **Off by default and free when off.** With both values 0: no allocation, one branch in
-   `show()`, output bit-identical to the current firmware.
+1. **Off by default and free when off.** With both values 0: no allocation, one `needsSmoothing()`
+   check per active segment in `show()`, then stock `blendSegment()` — bit-identical output to
+   firmware without the feature path. Workspace freed when no segment is smoothed; hist freed
+   when that segment's temporal is 0.
 2. **Reset history** (copy the current frame into the state, no fade-in of stale content) when:
    the feature goes from off to on, `updatePixelBuffer()` changes the length, the matrix
    configuration changes, and the strip is switched on after being off (`bri == 0` before).
 3. **Concurrency.** The JSON handler runs in another task than `show()` on ESP32. Do **not**
    allocate or free the history buffer in the setter. The setter only stores the two target
-   values (`volatile uint8_t`). `show()` (main loop context) notices the change and does
-   allocation, free and reset itself. This avoids a race without `suspend()/waitForIt()`.
-4. **Allocation failure** degrades gracefully: disable temporal smoothing, keep rendering,
-   optionally set `errorFlag = ERR_NORAM_PX` once. Never stop rendering for this feature.
-5. **Realtime mode.** In realtime mode `_pixels[]` is not cleared and may be updated
-   partially (for example some E1.31 universes). An in-place filter would feed its own output
-   back in the next frame (compounding blur). Step 1: skip smoothing whenever `_pixels[]` is
-   not rebuilt from segments, i.e. when the condition of the compose block in `show()` is
-   false. A later option could add a non-destructive realtime variant that writes into a
-   scratch buffer.
-6. **Compile-time switch.** `WLED_DISABLE_OUTPUT_SMOOTHING`, automatically defined when
+   values. `show()` (main loop context) notices the change and does allocation, free and reset
+   itself. Root-`sm` migration may use `suspend()/waitForIt()` when mutating live segments.
+4. **Allocation failure** degrades gracefully: fall back to stock `blendSegment()`, keep
+   rendering, optionally set `errorFlag = ERR_NORAM_PX` once. Never stop rendering for this feature.
+5. **Realtime mode.** Skip smoothing whenever `_pixels[]` is not rebuilt from segments; reseed
+   hist on exit from passthrough.
+6. **Transitions.** While `seg.isInTransition()`, use stock `blendSegment()` for that frame
+   (avoids duplicating all transition/push clipping in the local mapper). Intentional.
+7. **Compile-time switch.** `WLED_DISABLE_OUTPUT_SMOOTHING`, automatically defined when
    `WLED_DISABLE_GLOBAL_PIXELBUFFER` is defined (ESP8266). Do not edit `platformio.ini`
    (maintainer approval needed). All new code is wrapped in `#ifndef WLED_DISABLE_OUTPUT_SMOOTHING`.
-7. **Flash size.** Measure the increase on the tightest ESP32 envs (S2, C3, 4 MB boards) and
+8. **Flash size.** Measure the increase on the tightest ESP32 envs (S2, C3, 4 MB boards) and
    report it. If an env no longer fits, say so and propose a flag rather than editing
    `platformio.ini`.
-8. **Expected visual side effects** (document, not a bug): moving sharp edges get short
+9. **Expected visual side effects** (document, not a bug): moving sharp edges get short
    trails, single-LED features lose peak brightness, the temporal filter adds latency of about `tau`.
+10. **Allocators.** Bulk pixel/hist buffers use `allocate_buffer()` from `util.cpp`
+    (`BFRALLOC_NOBYTEACCESS | BFRALLOC_PREFER_PSRAM` for 32-bit color/hist; coverage without
+    `NOBYTEACCESS`). Free via `p_free`. No raw `malloc` for pixel data.
 
 ## 6. API contract (frozen so UI and firmware can be built in parallel)
 
@@ -216,7 +227,7 @@ Loaded in `deserializeConfig()` (`cfg.cpp`, near the `fps` handling at line 190)
 |---|---|
 | Filter core | `wled00/output_smoothing.{h,cpp}` — `SmoothWorkspace`, `SegmentSmoothHist`, coverage-aware spatial blur |
 | Segment fields / hist lifecycle | `Segment::smoothSpatial` / `smoothTemporal` + `_smoothHist` in `FX.h` / `FX_fcn.cpp` |
-| Render path | `blendSegment()` layer capture via `putPixel`; per-segment map→filter→`compositeSmoothLayer()` in `show()` |
+| Render path | Stock `blendSegment()` unchanged; `smoothAndCompositeSegment()` + local mapper + `compositeSmoothLayer()`; gated in `show()` |
 | State / presets | `serializeSegment` / `deserializeSegment` `sm.{x,t}`; optional root `sm` migration in `deserializeState` |
 | Boot defaults | `smoothDefaultX/T` in `wled.h`, cfg `hw.led.sm`, settings `SMX`/`SMT`, `Segment::setSmoothDefaults()` |
 | UI | Per-segment Linear/Time rows in `populateSegments()` (`index.js` / `index.css`); pointer-locked drag updates |
@@ -225,14 +236,14 @@ ESP8266 / `WLED_DISABLE_GLOBAL_PIXELBUFFER` builds define `WLED_DISABLE_OUTPUT_S
 
 ## 8. Memory and speed budget (estimates, not measurements)
 
-- RAM when a segment has temporal smoothing on: 16 bytes per strip LED for that segment's
-  history (2 stages × 8 bytes). Multiple overlapping smoothed segments each keep their own
-  history. Spatial: no full extra buffer (at most one row in 2D) plus one strip-sized
-  `SmoothWorkspace` reused across segments.
-- Time: roughly 60 to 80 cycles per LED for spatial + 2 temporal stages (instruction count
-  estimate). About 0.3 ms per frame for 1000 LEDs on a 240 MHz ESP32, against 23.8 ms per
-  frame at 42 FPS. Roughly twice as slow on a 160 MHz C3. Replace with measured timings when
-  available.
+- RAM when a segment of length N has temporal smoothing on: **16 × N** bytes history
+  (2 stages × 8 bytes), not 16 × strip length. Multiple overlapping smoothed segments each
+  keep their own history sized to that segment. Workspace: one reusable buffer of
+  **5 × max(N)** among currently smoothed segments (4 B color + 1 B coverage); freed when
+  none need smoothing.
+- Time: filter cost scales with segment length N, not strip length. Roughly 60 to 80 cycles
+  per LED for spatial + 2 temporal stages. With all `sm` at 0/0, cost is one bool per active
+  segment then stock `blendSegment()`.
 - PSRAM history is acceptable (sequential access), but note the slow raw PSRAM access of
   quad-SPI S2/S3 variants in the measurements.
 
@@ -252,9 +263,11 @@ ESP8266 / `WLED_DISABLE_GLOBAL_PIXELBUFFER` builds define `WLED_DISABLE_OUTPUT_S
 - Coverage marks written pixels; spatial blur stops at uncovered spacing/bounds (no cross-segment bleed).
 - After filtering, the layer is composited with the segment's Blend Mode and captured opacity.
   Overlaps are truly independent; Blend Mode `Bottom` ignores the filtered top layer.
-- Temporal history is owned by each `Segment` (lazy), sized to the strip length while enabled.
-  Overlapping smoothed segments therefore sum history RAM.
-- A single strip-owned `SmoothWorkspace` is reused sequentially (colors + coverage).
+- Temporal history is owned by each `Segment` (lazy), sized to **`seg.length()`** while temporal > 0.
+- A single strip-owned `SmoothWorkspace` is reused sequentially and grows to the largest
+  currently smoothed `seg.length()`.
+- While a segment is in a spatial/fade transition, smoothing is skipped for that frame
+  (stock `blendSegment()`), so the local mapper stays small.
 
 ## 11. Rules for agents working on this (from `AGENTS.md`)
 
