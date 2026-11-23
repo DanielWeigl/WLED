@@ -1458,14 +1458,16 @@ void WS2812FX::updatePixelBuffer() {
   // Skip the global framebuffer: blendSegment() encodes directly into bus encode buffers.
   // This saves N*4 bytes of heap (e.g. 1200B for 300 LEDs, 2000B for 500 LEDs).
   #else
+  #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
+  // Free smoothing workspace before allocating the new framebuffer so peak
+  // heap use is lower; temporal histories stay allocated and are only reset.
+  _smoothWs.freeBuffers();
+  resetAllSmoothHist(); // length/layout change → re-seed temporal history on next frame
+  #endif
   uint32_t requiredMem = getLengthTotal() * sizeof(uint32_t);
   // use PSRAM if available: there is no measurable perfomance impact between PSRAM and DRAM on S2/S3 with QSPI PSRAM for this buffer
   _pixels = static_cast<uint32_t*>(allocate_buffer(requiredMem, BFRALLOC_ENFORCE_PSRAM | BFRALLOC_NOBYTEACCESS | BFRALLOC_CLEAR));
   DEBUG_PRINTF_P(PSTR("strip buffer size: %uB\n"), requiredMem);
-  #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-  resetAllSmoothHist(); // length/layout change → re-seed temporal history on next frame
-  _smoothWs.freeBuffers();
-  #endif
   #endif
 }
 
