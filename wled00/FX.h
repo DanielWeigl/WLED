@@ -658,7 +658,7 @@ class Segment {
       #endif
       deallocateData();
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-      delete _smoothHist; _smoothHist = nullptr;
+      freeSmoothHist();
 #endif
       p_free(pixels);
     }
@@ -968,7 +968,7 @@ class WS2812FX {
     }
 
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    // Per-segment output smoothing (see docs/design/output-smoothing.md)
+    // Per-segment output smoothing
     void resetAllSmoothHist();
     // Map → filter (seg.length() workspace) → composite. false = caller should blendSegment().
     bool smoothAndCompositeSegment(Segment &seg, unsigned dtMs);

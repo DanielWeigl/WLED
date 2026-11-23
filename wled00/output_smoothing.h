@@ -1,7 +1,6 @@
 #pragma once
 /*
   Output smoothing — per-segment spatial + temporal filter on a mapped physical layer.
-  See docs/design/output-smoothing.md
 */
 #ifndef WLED_OUTPUT_SMOOTHING_H
 #define WLED_OUTPUT_SMOOTHING_H
