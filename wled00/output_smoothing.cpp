@@ -227,7 +227,9 @@ void OutputSmoothing::applySpatial(uint32_t *px, const uint8_t *cover, unsigned 
   if (spatial > SMOOTH_SPATIAL_BINOMIAL_MAX) {
     float sigma = (float)spatial / 10.0f;
     if (sigma < 0.1f) sigma = 0.1f;
-    float alphaF = 1.0f - expf(-1.0f / sigma);
+    // Forward+backward exponential ≈ Laplace with variance 2τ²; set τ = σ/√2
+    // so the combined pass matches the configured spatial sigma (binomial branch unchanged).
+    float alphaF = 1.0f - expf(-sqrtf(2.0f) / sigma);
     if (alphaF < 0.0f) alphaF = 0.0f;
     if (alphaF > 1.0f) alphaF = 1.0f;
     uint16_t alphaQ15 = (uint16_t)(alphaF * 32768.0f + 0.5f);
