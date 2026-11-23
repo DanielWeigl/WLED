@@ -888,7 +888,7 @@ function populateSegments(s)
 								`<i class="icons sm-icon">&#xe34b;</i>`+
 								`<span class="sm-lbl">Linear</span>`+
 								`<div class="sliderwrap il">`+
-									`<input id="seg${i}smx" class="noslide" data-seg="${i}" data-sm="x" onpointerdown="smPointerBegin()" onpointerup="smPointerEnd()" onpointercancel="smPointerEnd()" oninput="updateTrail(this); setSmoothLive(${i},'x',this)" onchange="updateTrail(this); setSmoothLive(${i},'x',this); smPointerEnd()" max="1000" min="0" type="range" value="${px}" />`+
+									`<input id="seg${i}smx" class="noslide" data-sm="x" onchange="setSmooth(${i})" oninput="updateTrail(this); formatSmoothLabel(this)" max="1000" min="0" type="range" value="${px}" />`+
 									`<div class="sliderdisplay"></div>`+
 								`</div>`+
 								`<output class="sliderbubble" id="seg${i}smxOut">${smPosToSpatial(px).toFixed(2)}</output>`+
@@ -897,7 +897,7 @@ function populateSegments(s)
 								`<i class="icons sm-icon">&#xe325;</i>`+
 								`<span class="sm-lbl">Time</span>`+
 								`<div class="sliderwrap il">`+
-									`<input id="seg${i}smt" class="noslide" data-seg="${i}" data-sm="t" onpointerdown="smPointerBegin()" onpointerup="smPointerEnd()" onpointercancel="smPointerEnd()" oninput="updateTrail(this); setSmoothLive(${i},'t',this)" onchange="updateTrail(this); setSmoothLive(${i},'t',this); smPointerEnd()" max="1000" min="0" type="range" value="${pt}" />`+
+									`<input id="seg${i}smt" class="noslide" data-sm="t" onchange="setSmooth(${i})" oninput="updateTrail(this); formatSmoothLabel(this)" max="1000" min="0" type="range" value="${pt}" />`+
 									`<div class="sliderdisplay"></div>`+
 								`</div>`+
 								`<output class="sliderbubble" id="seg${i}smtOut">${Math.round(smPosToMs(pt))} ms</output>`+
@@ -932,8 +932,8 @@ function populateSegments(s)
 		updateLen(i);
 		updateTrail(gId(`seg${i}bri`));
 		let sx = gId(`seg${i}smx`), st = gId(`seg${i}smt`);
-		if (sx) { updateTrail(sx); formatSmoothLabel(i, 'x', sx.value); }
-		if (st) { updateTrail(st); formatSmoothLabel(i, 't', st.value); }
+		if (sx) { updateTrail(sx); formatSmoothLabel(sx); }
+		if (st) { updateTrail(st); formatSmoothLabel(st); }
 		gId(`segr${i}`).classList.add("hide");
 	}
 	if (segCount < 2) {
@@ -1209,7 +1209,7 @@ function updateTrail(e)
 		sd.style.backgroundImage = val;
 	}
 	var b = e.parentNode.parentNode.getElementsByTagName('output')[0];
-	// Per-segment smoothing rows keep a formatted label (LEDs / ms); setSmoothLive owns that text.
+	// Per-segment smoothing rows keep a formatted label (LEDs / ms); formatSmoothLabel owns that text.
 	if (b && !e.parentNode.parentNode.classList.contains('sm-row')) b.innerHTML = e.value;
 }
 
@@ -1517,15 +1517,7 @@ function readState(s,command=false)
 	if (tr===0) gId('bsp').classList.add('hide')
 	else gId('bsp').classList.remove('hide')
 
-	// Never rebuild the segment panel while a smoothing slider is held — intermediate
-	// WebSocket echoes match an older sent value and recreate the <input>, which flickers.
-	// After release, keep the local thumb until the device echoes the last sent sm values.
-	if (smPointerDown || (smDirty && !smoothEchoMatches(s))) {
-		// leave segment DOM alone
-	} else {
-		if (smDirty) clearSmoothDrag();
-		populateSegments(s);
-	}
+	populateSegments(s);
 	hasRGB = hasWhite = hasCCT = has2D = false;
 	segLmax = 0; // reset max selected segment length
 	let i = {};
@@ -2514,18 +2506,11 @@ function setBri()
 	requestJson(obj);
 }
 
-// Per-segment output smoothing sliders. Throttled WS/JSON updates while dragging.
+// Per-segment output smoothing: send on release (like opacity/brightness).
 // Slider position is 0..1000 with a piecewise log map (finer resolution at the low end):
 //   Linear (spatial): first half → 0–1 LED,  second half → 1–5 LED (log)
 //   Time (temporal):  first half → 0–100 ms, second half → 100–1000 ms (log)
 // API keeps seg.sm.x in 0.1 LED units (0..50) and seg.sm.t in 10 ms units (0..100).
-var smPointerDown = false; // true while mouse/touch is held on a smoothing slider
-var smDirty = false;       // true after a local change until the device echoes it
-var smThrottle = null;
-var smPendingBySeg = {}; // segId → latest unsent sm command (coalesce per segment)
-var smDragSeg = -1, smDragX = 0, smDragT = 0;
-var smSentX = 0, smSentT = 0; // last values actually sent for smDragSeg
-var smSettleTimer = null;
 var SM_POS_MAX = 1000, SM_POS_MID = 500;
 function smPosToSpatial(pos)
 {
@@ -2551,89 +2536,21 @@ function smMsToPos(ms)
 	if (ms <= 100) return Math.round((ms / 100) * SM_POS_MID);
 	return Math.round(SM_POS_MID + Math.log10(ms / 100) * SM_POS_MID);
 }
-function formatSmoothLabel(segId, ch, pos)
+function formatSmoothLabel(el)
 {
-	if (ch==='x') {
-		let o = gId(`seg${segId}smxOut`);
-		if (o) o.innerHTML = smPosToSpatial(pos).toFixed(2);
-	} else {
-		let o = gId(`seg${segId}smtOut`);
-		if (o) o.innerHTML = Math.round(smPosToMs(pos)) + ' ms';
-	}
-}
-function smoothEchoMatches(s)
-{
-	// An echo of the last-sent value must not settle the drag while a newer local
-	// value is still queued (e.g. Linear retained after a subsequent Time edit).
-	if (smDragSeg < 0 || smPendingBySeg[smDragSeg] || !s || !Array.isArray(s.seg)) return false;
-	for (const seg of s.seg) {
-		if ((seg.id|0) !== smDragSeg) continue;
-		const sm = seg.sm || {};
-		return (parseInt(sm.x)||0) === smSentX && (parseInt(sm.t)||0) === smSentT;
-	}
-	return false;
-}
-function clearSmoothDrag()
-{
-	smDirty = false;
-	smPointerDown = false;
-	smDragSeg = -1;
-	if (smSettleTimer) { clearTimeout(smSettleTimer); smSettleTimer = null; }
-}
-function smPointerBegin()
-{
-	smPointerDown = true;
-	if (smSettleTimer) { clearTimeout(smSettleTimer); smSettleTimer = null; }
-}
-function smPointerEnd()
-{
-	smPointerDown = false;
-	// Safety: if no matching echo arrives, unlock and refresh so a later preset/state
-	// change cannot leave stale slider positions on screen.
-	if (smSettleTimer) clearTimeout(smSettleTimer);
-	smSettleTimer = setTimeout(()=>{
-		clearSmoothDrag();
-		requestJson(); // pull state and rebuild segments if needed
-	}, 2000);
-}
-function flushSmoothPending()
-{
-	const pending = smPendingBySeg;
-	smPendingBySeg = {};
-	for (const id of Object.keys(pending)) {
-		const cmd = pending[id];
-		if (!cmd) continue;
-		if ((cmd.seg.id|0) === smDragSeg) {
-			smSentX = cmd.seg.sm.x;
-			smSentT = cmd.seg.sm.t;
-		}
-		requestJson(cmd);
-	}
-	// Trailing flush while the pointer is moving.
-	smThrottle = setTimeout(()=>{
-		smThrottle = null;
-		if (Object.keys(smPendingBySeg).length) flushSmoothPending();
-	}, 66);
-}
-function setSmoothLive(segId, ch, el)
-{
-	smDirty = true;
-	smDragSeg = segId;
-	if (smSettleTimer) { clearTimeout(smSettleTimer); smSettleTimer = null; }
+	let o = gId(el.id + 'Out');
+	if (!o) return;
 	let pos = parseInt(el.value)||0;
-	formatSmoothLabel(segId, ch, pos);
-	if (ch==='x') smDragX = Math.round(Math.min(50, Math.max(0, smPosToSpatial(pos) * 10)));
-	else smDragT = Math.round(Math.min(100, Math.max(0, smPosToMs(pos) / 10)));
-	// Keep the sibling channel from the other slider when present.
-	let other = gId(ch==='x' ? `seg${segId}smt` : `seg${segId}smx`);
-	if (ch==='x') {
-		if (other) smDragT = Math.round(Math.min(100, Math.max(0, smPosToMs(other.value) / 10)));
-	} else {
-		if (other) smDragX = Math.round(Math.min(50, Math.max(0, smPosToSpatial(other.value) * 10)));
-	}
-	// Coalesce edits to the same segment; retain other segments' pending cmds.
-	smPendingBySeg[segId] = {"seg":{"id":segId,"sm":{"x":smDragX,"t":smDragT}}};
-	if (!smThrottle) flushSmoothPending();
+	o.innerHTML = (el.dataset.sm === 'x') ? smPosToSpatial(pos).toFixed(2) : Math.round(smPosToMs(pos)) + ' ms';
+}
+
+function setSmooth(s)
+{
+	var sx = gId(`seg${s}smx`), st = gId(`seg${s}smt`);
+	if (!sx || !st) return;
+	let x = Math.round(Math.min(50, Math.max(0, smPosToSpatial(sx.value) * 10)));
+	let t = Math.round(Math.min(100, Math.max(0, smPosToMs(st.value) / 10)));
+	requestJson({"seg":{"id":s,"sm":{"x":x,"t":t}}});
 }
 
 function setSpeed()
@@ -2677,8 +2594,6 @@ function setLor(i)
 
 function setPreset(i)
 {
-	// Drop smoothing drag lock so populateSegments can show preset sm (incl. 0/0).
-	clearSmoothDrag();
 	var obj = {"ps":i};
 	if (!isPlaylist(i) && pJson && pJson[i] && (!pJson[i].win || pJson[i].win.indexOf("Please") <= 0)) {
 		// we will send the complete preset content as to avoid delay introduced by
