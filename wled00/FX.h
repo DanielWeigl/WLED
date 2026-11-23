@@ -520,7 +520,8 @@ class Segment {
     static uint16_t      _lastPaletteChange;  // last random palette change time (in seconds)
     static uint16_t      _nextPaletteBlend;   // next due time for random palette morph (in millis())
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    static uint8_t       _defaultSmoothTemporal; // boot/new-segment temporal default (cfg SMT); spatial always starts at 0
+    static uint8_t       _defaultSmoothSpatial;  // boot/new-segment default (from cfg SMX)
+    static uint8_t       _defaultSmoothTemporal; // boot/new-segment default (from cfg SMT)
 #endif
     static bool          _modeBlend;          // mode/effect blending semaphore
     // clipping rectangle used for blending
@@ -613,7 +614,7 @@ class Segment {
     , check3(false)
     , blendMode(0)
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    , smoothSpatial(0)
+    , smoothSpatial(_defaultSmoothSpatial)
     , smoothTemporal(_defaultSmoothTemporal)
     , _smoothHist(nullptr)
 #endif
@@ -727,9 +728,11 @@ class Segment {
       */
     inline Segment &markForReset() { reset = true; return *this; }  // setOption(SEG_OPTION_RESET, true)
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
-    inline static void setDefaultSmoothTemporal(uint8_t temporal) {
+    inline static void setSmoothDefaults(uint8_t spatial, uint8_t temporal) {
+      _defaultSmoothSpatial = OutputSmoothing::clampSpatial(spatial);
       _defaultSmoothTemporal = OutputSmoothing::clampTemporal(temporal);
     }
+    inline static uint8_t getDefaultSmoothSpatial()  { return _defaultSmoothSpatial; }
     inline static uint8_t getDefaultSmoothTemporal() { return _defaultSmoothTemporal; }
     void resetSmoothHist();
     void freeSmoothHist();

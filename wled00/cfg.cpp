@@ -195,17 +195,21 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
   {
     JsonObject sm = hw_led[F("sm")];
     if (!sm.isNull()) {
-      // Spatial default is always 0; ignore legacy cfg "x" if present.
+      int sx = sm["x"] | (int)smoothDefaultX;
       int st = sm["t"] | (int)smoothDefaultT;
+      if (sx < 0) sx = 0;
+      if (sx > SMOOTH_SPATIAL_MAX) sx = SMOOTH_SPATIAL_MAX;
       if (st < 0) st = 0;
       if (st > SMOOTH_TEMPORAL_MAX) st = SMOOTH_TEMPORAL_MAX;
+      smoothDefaultX = (byte)sx;
       smoothDefaultT = (byte)st;
     }
-    Segment::setDefaultSmoothTemporal(smoothDefaultT);
-    // Apply temporal default to existing segments that are still fully off after boot.
+    Segment::setSmoothDefaults(smoothDefaultX, smoothDefaultT);
+    // Apply defaults to existing segments that are still at 0/0 after boot load of empty state.
     for (size_t i = 0; i < strip.getSegmentsNum(); i++) {
       Segment &seg = strip.getSegment(i);
       if (seg.smoothSpatial == 0 && seg.smoothTemporal == 0) {
+        seg.smoothSpatial = smoothDefaultX;
         seg.smoothTemporal = smoothDefaultT;
       }
     }
@@ -1035,7 +1039,8 @@ void serializeConfig(JsonObject root) {
 #ifndef WLED_DISABLE_OUTPUT_SMOOTHING
   {
     JsonObject sm = hw_led.createNestedObject(F("sm"));
-    setConfigValue(sm, "t", smoothDefaultT); // spatial default is always 0 (not stored)
+    setConfigValue(sm, "x", smoothDefaultX);
+    setConfigValue(sm, "t", smoothDefaultT);
   }
 #endif
 
